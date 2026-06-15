@@ -211,7 +211,7 @@ class DatabasePopulator:
             "Commissioning_Actual",
         ]:
             self._ensure_lookup(session, MilestoneType, milestone)
-        for source in ["CNE", "PGP", "SEO", "Manual"]:
+        for source in ["CNE", "PGP", "SEO", "User"]:
             self._ensure_lookup(session, Source, source)
 
     def _add_legal_document(
