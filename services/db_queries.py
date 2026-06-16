@@ -1,15 +1,17 @@
+"""SQL query definitions used by the Streamlit data service."""
+
 PROJECTS_BASE_QUERY = """
 SELECT
     p.ProjectID,
     p.ProjectName,
     p.NUP,
-    ps.StateName,
+    ps.StatusName,
     pe.ProjectEntityName,
     p.URL,
     p.project_discriminator
 FROM Project p
-LEFT JOIN ProjectState ps
-    ON p.StateID = ps.StateID
+LEFT JOIN ProjectStatus ps
+    ON p.StatusID = ps.StatusID
 LEFT JOIN ProjectEntity pe
     ON p.ProjectEntityID = pe.ProjectEntityID
 ORDER BY p.ProjectID;
@@ -36,6 +38,7 @@ SELECT
     p.ProjectID,
     p.ProjectName,
     p.NUP,
+    ps.StatusName,
     pe.ProjectEntityName,
     lrd.MilestoneName AS LastMilestoneName,
     lrd.SourceName AS LastMilestoneSource,
@@ -43,11 +46,13 @@ SELECT
     p.URL AS PGP_URL,
     CASE
         WHEN p.project_discriminator = 'transmission' AND p.NUP IS NOT NULL
-        THEN 'https://seguimientoejecucionobras.coordinador.cl/'
+            THEN 'https://seguimientoejecucionobras.coordinador.cl/'
         ELSE NULL
     END AS SEO_URL,
     p.project_discriminator
 FROM Project p
+LEFT JOIN ProjectStatus ps
+    ON p.StatusID = ps.StatusID
 LEFT JOIN ProjectEntity pe
     ON p.ProjectEntityID = pe.ProjectEntityID
 LEFT JOIN LastRelevantDate lrd
@@ -152,12 +157,8 @@ LEFT JOIN MilestoneType mt
     ON rd.MilestoneTypeID = mt.MilestoneTypeID
 LEFT JOIN Source s
     ON rd.SourceID = s.SourceID
-ORDER BY
-    rd.ProjectID,
-    rd.DateValue DESC,
-    rd.ExtractedAt DESC;
+ORDER BY rd.ProjectID, rd.DateValue DESC, rd.ExtractedAt DESC;
 """
-
 
 PROJECT_LEGAL_DOCUMENTS_QUERY = """
 SELECT
@@ -170,8 +171,5 @@ LEFT JOIN LegalDocument ld
     ON pld.DocumentID = ld.DocumentID
 LEFT JOIN DocumentType dt
     ON ld.DocumentTypeID = dt.DocumentTypeID
-ORDER BY
-    pld.ProjectID,
-    dt.TypeName,
-    ld.DocumentYear;
+ORDER BY pld.ProjectID, dt.TypeName, ld.DocumentYear;
 """

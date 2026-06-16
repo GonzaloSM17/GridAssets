@@ -18,29 +18,27 @@ from typing import Any, Dict, Iterable, Optional, Tuple
 
 from sqlalchemy.orm import sessionmaker
 
-from database.db_connection import get_sqlserver_engine, get_connection_string
-
-from parsers.db_projects_parse import ProjectParser
-
-from services.technology_resolver import TechnologyResolver
-
+from database.db_connection import get_connection_string, get_sqlserver_engine
 from database.db_orm_model import (
-    ProjectState,
-    ProjectEntity,
+    BESSProject as ORMBESS,
     Bay,
+    DERProject as ORMDER,
     DocumentType,
+    GenerationProject as ORMGeneration,
+    LegalDocument,
     MilestoneType,
+    ProjectEntity,
+    ProjectLegalDocument,
+    ProjectStatus,
+    RelevantDate,
     Source,
     TransmissionProject as ORMTransmission,
-    GenerationProject as ORMGeneration,
-    DERProject as ORMDER,
-    BESSProject as ORMBESS,
-    LegalDocument,
-    ProjectLegalDocument,
-    RelevantDate,
 )
+from parsers.db_projects_parse import ProjectParser
+from services.technology_resolver import TechnologyResolver
 
 PROJECT_TYPE_KEYS = ("transmission", "generation", "der", "bess")
+DEFAULT_PROJECT_STATUS = "UnderConstruction"
 
 
 def _empty_project_summary() -> Dict[str, Any]:
@@ -73,7 +71,6 @@ def _empty_summary(dry_run: bool, extraction_time: datetime) -> Dict[str, Any]:
         summary[key] = _empty_project_summary()
 
     summary["total"] = _empty_project_summary()
-
     return summary
 
 
@@ -95,7 +92,6 @@ class DatabasePopulator:
     # ------------------------------------------------------------------
     # Summary helpers
     # ------------------------------------------------------------------
-
     def _reset_summary(self, dry_run: bool) -> None:
         """Reset summary state before each population run."""
         self.extraction_time = datetime.now()
@@ -131,7 +127,6 @@ class DatabasePopulator:
             "project_name": project_name,
             "error": str(error),
         }
-
         self.summary[project_type]["error_details"].append(detail)
         self.summary["total"]["error_details"].append(detail)
         self._increment(project_type, "errors")
@@ -139,16 +134,13 @@ class DatabasePopulator:
     # ------------------------------------------------------------------
     # Data helpers
     # ------------------------------------------------------------------
-
     @staticmethod
     def _has_value(value: Any) -> bool:
         """Return whether a value should be considered useful."""
         if value is None:
             return False
-
         if isinstance(value, str):
             return bool(value.strip())
-
         return True
 
     @staticmethod
@@ -158,7 +150,6 @@ class DatabasePopulator:
             return None
 
         text = str(value).strip()
-
         return text if text else None
 
     @staticmethod
@@ -166,13 +157,10 @@ class DatabasePopulator:
         """Convert date-like values to datetime."""
         if value is None:
             return None
-
         if isinstance(value, datetime):
             return value
-
         if isinstance(value, date):
             return datetime.combine(value, datetime.min.time())
-
         return None
 
     def _set_if_changed(
@@ -187,59 +175,83 @@ class DatabasePopulator:
             return False
 
         current_value = getattr(orm_obj, attr_name)
-
         if current_value == new_value:
             return False
 
         setattr(orm_obj, attr_name, new_value)
         self._increment_field_change(project_type, attr_name)
-
         return True
 
     # ------------------------------------------------------------------
     # Lookup and related entities
     # ------------------------------------------------------------------
-
     def _ensure_lookup(self, session, model_class, value: str):
         """Get or create a lookup entry.
 
-        This expects lookup tables whose second column is the human-readable
-        name column, such as ProjectState.StateName or Source.SourceName.
+        Lookup tables in this project use different readable-name columns,
+        for example ProjectStatus.StatusName, Source.SourceName,
+        MilestoneType.MilestoneName, and DocumentType.DocumentTypeName.
+        This method detects the name column instead of assuming a fixed one.
         """
         if not self._has_value(value):
             return None
 
-        value = str(value).strip()
-        columns = list(model_class.__table__.columns.keys())
-        name_column = columns[1]
+        clean_value = str(value).strip()
+        if not clean_value:
+            return None
+
+        name_column = self._get_lookup_name_column(model_class)
 
         obj = (
             session.query(model_class)
-            .filter(getattr(model_class, name_column) == value)
+            .filter(getattr(model_class, name_column) == clean_value)
             .one_or_none()
         )
-
         if obj:
             return obj
 
         obj = model_class()
-        setattr(obj, name_column, value)
-
+        setattr(obj, name_column, clean_value)
         session.add(obj)
         session.flush()
-
         return obj
+
+    @staticmethod
+    def _get_lookup_name_column(model_class) -> str:
+        """Return the readable-name column for a lookup ORM class."""
+        preferred_columns = (
+            "StatusName",
+            "SourceName",
+            "MilestoneName",
+            "DocumentTypeName",
+            "ProjectEntityName",
+            "EntityName",
+            "BayName",
+            "TechnologyName",
+            "Name",
+            "TypeName",
+        )
+
+        for column_name in preferred_columns:
+            if hasattr(model_class, column_name):
+                return column_name
+
+        columns = list(model_class.__table__.columns.keys())
+        if len(columns) >= 2:
+            return columns[1]
+
+        raise ValueError(f"No lookup name column found for {model_class.__name__}")
 
     def _populate_lookups(self, session) -> None:
         """Populate initial lookup tables."""
-        for state in (
+        for status in (
             "InService",
             "NonStarted",
-            "UnderConstruction",
+            DEFAULT_PROJECT_STATUS,
             "OnHold",
             "Cancelled",
         ):
-            self._ensure_lookup(session, ProjectState, state)
+            self._ensure_lookup(session, ProjectStatus, status)
 
         for document_type in (
             "Act",
@@ -261,6 +273,11 @@ class DatabasePopulator:
         for source in ("CNE", "PGP", "SEO", "User"):
             self._ensure_lookup(session, Source, source)
 
+    def _default_status_id(self, session) -> Optional[int]:
+        """Return the default status ID used for all CNE-populated projects."""
+        status = self._ensure_lookup(session, ProjectStatus, DEFAULT_PROJECT_STATUS)
+        return status.StatusID if status else None
+
     def _add_legal_document(
         self,
         session,
@@ -279,19 +296,17 @@ class DatabasePopulator:
             return result
 
         doc_name = str(doc_value).strip()
-
         if " 00:00:00" in doc_name or "Timestamp" in str(type(doc_value).__name__):
             self._add_warning(
                 project_type,
                 (
-                    f"Skipped suspicious legal document value for ProjectID "
+                    "Skipped suspicious legal document value for ProjectID "
                     f"{project_id}: {doc_name}"
                 ),
             )
             return result
 
         doc_year = None
-
         if "/" in doc_name:
             try:
                 year_str = doc_name.split("/")[-1].strip()
@@ -300,7 +315,6 @@ class DatabasePopulator:
                 doc_year = None
 
         doc_type = self._ensure_lookup(session, DocumentType, doc_type_name)
-
         doc = (
             session.query(LegalDocument)
             .filter(
@@ -318,7 +332,6 @@ class DatabasePopulator:
             )
             session.add(doc)
             session.flush()
-
             result["document_created"] = True
             self._increment(project_type, "legal_documents_created")
 
@@ -337,7 +350,6 @@ class DatabasePopulator:
                 DocumentID=doc.DocumentID,
             )
             session.add(link)
-
             result["link_created"] = True
             self._increment(project_type, "legal_documents_linked")
 
@@ -362,7 +374,6 @@ class DatabasePopulator:
             return result
 
         dt_value = self._to_datetime(date_value)
-
         if not dt_value:
             self._add_warning(
                 project_type,
@@ -387,10 +398,8 @@ class DatabasePopulator:
             if existing.DateValue != dt_value:
                 existing.DateValue = dt_value
                 existing.ExtractedAt = self.extraction_time
-
                 result["date_updated"] = True
                 self._increment(project_type, "relevant_dates_updated")
-
             return result
 
         relevant_date = RelevantDate(
@@ -401,16 +410,13 @@ class DatabasePopulator:
             ExtractedAt=self.extraction_time,
         )
         session.add(relevant_date)
-
         result["date_created"] = True
         self._increment(project_type, "relevant_dates_created")
-
         return result
 
     # ------------------------------------------------------------------
     # Generic population helpers
     # ------------------------------------------------------------------
-
     def _get_or_create_project(
         self,
         session,
@@ -425,19 +431,37 @@ class DatabasePopulator:
             .filter(orm_class.ProjectName == project_name)
             .one_or_none()
         )
-
         if orm_project:
             return orm_project, False
 
         orm_project = orm_class(
             ProjectName=project_name,
+            StatusID=self._default_status_id(session),
             **create_kwargs,
         )
         session.add(orm_project)
-
         self._increment(project_type, "created")
-
         return orm_project, True
+
+    def _ensure_project_default_status(
+        self,
+        session,
+        orm_project: Any,
+        project_type: str,
+    ) -> bool:
+        """Ensure an existing CNE-populated project has the default status.
+
+        The CNE parser does not provide project status. Therefore, during the
+        population process, projects managed by this service are kept in the
+        default UnderConstruction status unless another workflow edits it later.
+        """
+        default_status_id = self._default_status_id(session)
+        if orm_project.StatusID == default_status_id:
+            return False
+
+        orm_project.StatusID = default_status_id
+        self._increment_field_change(project_type, "StatusID")
+        return True
 
     def _finish_project_state(
         self,
@@ -457,7 +481,6 @@ class DatabasePopulator:
     # ------------------------------------------------------------------
     # Project family population methods
     # ------------------------------------------------------------------
-
     def populate_transmission(self, session, dataclass_projects: Iterable[Any]) -> None:
         """Convert transmission dataclasses to ORM records."""
         project_type = "transmission"
@@ -467,11 +490,7 @@ class DatabasePopulator:
 
             try:
                 entity = (
-                    self._ensure_lookup(
-                        session,
-                        ProjectEntity,
-                        dc_project.project_entity,
-                    )
+                    self._ensure_lookup(session, ProjectEntity, dc_project.project_entity)
                     if dc_project.project_entity
                     else None
                 )
@@ -492,22 +511,24 @@ class DatabasePopulator:
                 session.flush()
 
                 changed = False
-
                 if not created:
+                    changed |= self._ensure_project_default_status(
+                        session,
+                        orm_project,
+                        project_type,
+                    )
                     changed |= self._set_if_changed(
                         orm_project,
                         "ProjectEntityID",
                         entity.ProjectEntityID if entity else None,
                         project_type,
                     )
-
                     changed |= self._set_if_changed(
                         orm_project,
                         "VoltageLevel",
                         dc_project.voltage_level,
                         project_type,
                     )
-
                     changed |= self._set_if_changed(
                         orm_project,
                         "TotalCapacity",
@@ -558,11 +579,7 @@ class DatabasePopulator:
                 self._finish_project_state(project_type, created, changed)
 
             except Exception as exc:
-                self._add_error(
-                    project_type,
-                    getattr(dc_project, "name", None),
-                    exc,
-                )
+                self._add_error(project_type, getattr(dc_project, "name", None), exc)
                 raise
 
     def populate_generation(self, session, dataclass_projects: Iterable[Any]) -> None:
@@ -613,27 +630,20 @@ class DatabasePopulator:
 
             try:
                 entity = (
-                    self._ensure_lookup(
-                        session,
-                        ProjectEntity,
-                        dc_project.project_entity,
-                    )
+                    self._ensure_lookup(session, ProjectEntity, dc_project.project_entity)
                     if dc_project.project_entity
                     else None
                 )
-
                 bay = (
                     self._ensure_lookup(session, Bay, dc_project.bay)
                     if dc_project.bay
                     else None
                 )
-
                 technology = self.technology_resolver.get_or_create(
                     session=session,
                     raw_value=dc_project.technology,
                     project_family=project_type,
                 )
-
                 capacity_value = getattr(dc_project, capacity_attr, None)
 
                 create_kwargs = {
@@ -655,43 +665,42 @@ class DatabasePopulator:
                 session.flush()
 
                 changed = False
-
                 if not created:
+                    changed |= self._ensure_project_default_status(
+                        session,
+                        orm_project,
+                        project_type,
+                    )
                     changed |= self._set_if_changed(
                         orm_project,
                         "ProjectEntityID",
                         entity.ProjectEntityID if entity else None,
                         project_type,
                     )
-
                     changed |= self._set_if_changed(
                         orm_project,
                         "BayID",
                         bay.BayID if bay else None,
                         project_type,
                     )
-
                     changed |= self._set_if_changed(
                         orm_project,
                         "TechnologyID",
                         technology.TechnologyID if technology else None,
                         project_type,
                     )
-
                     changed |= self._set_if_changed(
                         orm_project,
                         "PowerCapacity",
                         dc_project.power_capacity,
                         project_type,
                     )
-
                     changed |= self._set_if_changed(
                         orm_project,
                         capacity_field,
                         capacity_value,
                         project_type,
                     )
-
                     changed |= self._set_if_changed(
                         orm_project,
                         "Location",
@@ -722,17 +731,12 @@ class DatabasePopulator:
                 self._finish_project_state(project_type, created, changed)
 
             except Exception as exc:
-                self._add_error(
-                    project_type,
-                    getattr(dc_project, "name", None),
-                    exc,
-                )
+                self._add_error(project_type, getattr(dc_project, "name", None), exc)
                 raise
 
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
-
     def populate_all(
         self,
         parser: ProjectParser,
@@ -748,7 +752,6 @@ class DatabasePopulator:
 
         try:
             self._populate_lookups(session)
-
             self.populate_transmission(session, parser.transmission_projects)
             self.populate_generation(session, parser.generation_projects)
             self.populate_der(session, parser.der_projects)
@@ -767,10 +770,8 @@ class DatabasePopulator:
 
         except Exception as exc:
             session.rollback()
-
             if self.verbose:
                 print(f"Error: {exc}")
-
             raise
 
         finally:
@@ -791,7 +792,6 @@ if __name__ == "__main__":
 
     parser = ProjectParser(filename=filename)
     populator = DatabasePopulator(verbose=True)
-
     preview = populator.preview_all(parser)
 
     print("Preview summary:")

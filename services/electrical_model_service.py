@@ -4,7 +4,7 @@ from datetime import date, datetime, time
 from typing import Any
 
 import pandas as pd
-from sqlalchemy import text
+from sqlalchemy import func, text
 from sqlalchemy.orm import sessionmaker
 
 from database.db_connection import get_sqlserver_engine
@@ -17,7 +17,7 @@ from database.db_orm_model import (
 
 DEFAULT_SOFTWARE_NAMES = [
     "DIgSILENT PowerFactory",
-    "PSS/e",
+    "PSS/E",
     "PSCAD",
     "EMTP-RV",
 ]
@@ -25,24 +25,31 @@ DEFAULT_SOFTWARE_NAMES = [
 
 def _get_session():
     """Create a new SQLAlchemy session using the project SQL Server engine."""
-
     engine = get_sqlserver_engine()
     Session = sessionmaker(bind=engine)
     return Session()
 
 
+def _normalize_name(value: str | None) -> str:
+    """Normalize catalog names for case-insensitive comparisons."""
+    return str(value or "").strip().casefold()
+
+
 def _normalize_cutoff_datetime(cod_cutoff_date: date | datetime) -> datetime:
     """Convert a date picker value into an inclusive end-of-day datetime."""
-
     if isinstance(cod_cutoff_date, datetime):
         return cod_cutoff_date
-
     return datetime.combine(cod_cutoff_date, time.max)
 
 
 def ensure_default_software() -> None:
-    """Create default software records if they do not exist yet."""
+    """Create default software records if they do not exist yet.
 
+    SQL Server unique constraints are usually case-insensitive. This method must
+    therefore compare names case-insensitively too. Otherwise, an existing row
+    such as "PSS/e" can incorrectly look different from the canonical "PSS/E"
+    in Python and trigger a duplicate-key error.
+    """
     session = _get_session()
     try:
         _ensure_default_software(session)
@@ -55,37 +62,51 @@ def ensure_default_software() -> None:
 
 
 def _ensure_default_software(session) -> None:
-    """Internal helper to create default software records inside an open session."""
+    """Create missing default software records inside an open session.
 
-    existing_names = {row.SoftwareName for row in session.query(Software).all()}
+    Existing rows are matched by normalized name, not by exact Python string, so
+    the seed is idempotent with SQL Server case-insensitive collations.
+    """
+    existing_rows = session.query(Software).all()
+    software_by_normalized_name = {
+        _normalize_name(row.SoftwareName): row for row in existing_rows
+    }
 
-    for software_name in DEFAULT_SOFTWARE_NAMES:
-        if software_name not in existing_names:
-            session.add(
-                Software(
-                    SoftwareName=software_name,
-                    IsActive=True,
-                )
-            )
+    for canonical_name in DEFAULT_SOFTWARE_NAMES:
+        normalized_name = _normalize_name(canonical_name)
+        existing = software_by_normalized_name.get(normalized_name)
+
+        if existing:
+            # Keep one canonical spelling in the catalog. This also fixes rows
+            # previously created as variants such as "PSS/e".
+            if existing.SoftwareName != canonical_name:
+                existing.SoftwareName = canonical_name
+            if not bool(existing.IsActive):
+                existing.IsActive = True
+            continue
+
+        new_software = Software(
+            SoftwareName=canonical_name,
+            IsActive=True,
+        )
+        session.add(new_software)
+        software_by_normalized_name[normalized_name] = new_software
 
     session.flush()
 
 
 def list_software(include_inactive: bool = False) -> pd.DataFrame:
     """Return the software catalog."""
-
     session = _get_session()
     try:
         _ensure_default_software(session)
         session.commit()
 
         query = session.query(Software)
-
         if not include_inactive:
             query = query.filter(Software.IsActive == 1)
 
         rows = query.order_by(Software.SoftwareName).all()
-
         return pd.DataFrame(
             [
                 {
@@ -105,23 +126,22 @@ def list_software(include_inactive: bool = False) -> pd.DataFrame:
 
 def list_models(include_inactive: bool = False) -> pd.DataFrame:
     """Return electrical models with their software."""
-
     session = _get_session()
     try:
         _ensure_default_software(session)
         session.commit()
 
         query = session.query(ElectricalModel, Software).join(
-            Software, ElectricalModel.SoftwareID == Software.SoftwareID
+            Software,
+            ElectricalModel.SoftwareID == Software.SoftwareID,
         )
-
         if not include_inactive:
             query = query.filter(ElectricalModel.IsActive == 1)
 
         rows = query.order_by(
-            Software.SoftwareName, ElectricalModel.ElectricalModelName
+            Software.SoftwareName,
+            ElectricalModel.ElectricalModelName,
         ).all()
-
         return pd.DataFrame(
             [
                 {
@@ -129,6 +149,8 @@ def list_models(include_inactive: bool = False) -> pd.DataFrame:
                     "ElectricalModelName": model.ElectricalModelName,
                     "SoftwareID": software.SoftwareID,
                     "SoftwareName": software.SoftwareName,
+                    "SoftwareVersion": model.SoftwareVersion,
+                    "Description": model.Description,
                     "IsActive": bool(model.IsActive),
                 }
                 for model, software in rows
@@ -143,9 +165,7 @@ def list_models(include_inactive: bool = False) -> pd.DataFrame:
 
 def create_model(electrical_model_name: str, software_id: int) -> None:
     """Create or reactivate an electrical model for a software."""
-
     cleaned_name = str(electrical_model_name or "").strip()
-
     if not cleaned_name:
         raise ValueError("El nombre del modelo eléctrico no puede estar vacío.")
 
@@ -161,12 +181,14 @@ def create_model(electrical_model_name: str, software_id: int) -> None:
             session.query(ElectricalModel)
             .filter(
                 ElectricalModel.SoftwareID == int(software_id),
-                ElectricalModel.ElectricalModelName == cleaned_name,
+                func.lower(ElectricalModel.ElectricalModelName)
+                == cleaned_name.lower(),
             )
             .one_or_none()
         )
 
         if existing:
+            existing.ElectricalModelName = cleaned_name
             existing.IsActive = True
         else:
             session.add(
@@ -187,11 +209,9 @@ def create_model(electrical_model_name: str, software_id: int) -> None:
 
 def deactivate_model(electrical_model_id: int) -> None:
     """Soft-delete an electrical model."""
-
     session = _get_session()
     try:
         model = session.get(ElectricalModel, int(electrical_model_id))
-
         if not model:
             raise ValueError(
                 f"No existe el modelo eléctrico con ID {electrical_model_id}."
@@ -207,8 +227,7 @@ def deactivate_model(electrical_model_id: int) -> None:
 
 
 def get_project_modeling_status(project_id: int) -> pd.DataFrame:
-    """Return all active electrical models and the project True/False status."""
-
+    """Return all active electrical models and project True/False status."""
     session = _get_session()
     try:
         project = session.get(Project, int(project_id))
@@ -222,13 +241,11 @@ def get_project_modeling_status(project_id: int) -> pd.DataFrame:
             .order_by(Software.SoftwareName, ElectricalModel.ElectricalModelName)
             .all()
         )
-
         links = (
             session.query(ProjectElectricalModel)
             .filter(ProjectElectricalModel.ProjectID == int(project_id))
             .all()
         )
-
         modeled_by_model_id = {
             int(link.ElectricalModelID): bool(link.IsModeled) for link in links
         }
@@ -257,7 +274,6 @@ def update_project_modeling_status(
     is_modeled: bool,
 ) -> None:
     """Insert or update the modeling status for a project/model pair."""
-
     session = _get_session()
     try:
         project = session.get(Project, int(project_id))
@@ -274,7 +290,8 @@ def update_project_modeling_status(
             session.query(ProjectElectricalModel)
             .filter(
                 ProjectElectricalModel.ProjectID == int(project_id),
-                ProjectElectricalModel.ElectricalModelID == int(electrical_model_id),
+                ProjectElectricalModel.ElectricalModelID
+                == int(electrical_model_id),
             )
             .one_or_none()
         )
@@ -305,16 +322,12 @@ def preview_projects_for_bulk_modeling_by_cod(
     only_unmodeled: bool = True,
 ) -> pd.DataFrame:
     """Preview projects whose latest COD_Actual is less than or equal to cutoff."""
-
     cutoff_datetime = _normalize_cutoff_datetime(cod_cutoff_date)
-
-    selected_project_type = None
-    if project_type and project_type != "all":
-        selected_project_type = project_type
-
+    selected_project_type = None if not project_type or project_type == "all" else project_type
     only_unmodeled_int = 1 if only_unmodeled else 0
 
-    query = text("""
+    query = text(
+        """
         WITH LatestCOD AS (
             SELECT
                 p.ProjectID,
@@ -360,10 +373,10 @@ def preview_projects_for_bulk_modeling_by_cod(
                 OR ISNULL(pem.IsModeled, 0) = 0
             )
         ORDER BY c.COD_Actual DESC, c.ProjectID;
-        """)
+        """
+    )
 
     engine = get_sqlserver_engine()
-
     with engine.connect() as connection:
         df = pd.read_sql_query(
             query,
@@ -381,7 +394,6 @@ def preview_projects_for_bulk_modeling_by_cod(
 
     df["IsCurrentlyModeled"] = df["IsCurrentlyModeled"].astype(bool)
     df["COD_Actual"] = pd.to_datetime(df["COD_Actual"], errors="coerce")
-
     return df
 
 
@@ -392,14 +404,12 @@ def bulk_set_modeled_by_cod_date(
     only_unmodeled: bool = True,
 ) -> dict[str, Any]:
     """Mark as modeled all projects whose latest COD_Actual is <= cutoff."""
-
     preview_df = preview_projects_for_bulk_modeling_by_cod(
         electrical_model_id=electrical_model_id,
         cod_cutoff_date=cod_cutoff_date,
         project_type=project_type,
         only_unmodeled=only_unmodeled,
     )
-
     if preview_df.empty:
         return {
             "matched": 0,
@@ -425,13 +435,15 @@ def bulk_set_modeled_by_cod_date(
         existing_links = (
             session.query(ProjectElectricalModel)
             .filter(
-                ProjectElectricalModel.ElectricalModelID == int(electrical_model_id),
+                ProjectElectricalModel.ElectricalModelID
+                == int(electrical_model_id),
                 ProjectElectricalModel.ProjectID.in_(project_ids),
             )
             .all()
         )
-
-        links_by_project_id = {int(link.ProjectID): link for link in existing_links}
+        links_by_project_id = {
+            int(link.ProjectID): link for link in existing_links
+        }
 
         created_count = 0
         updated_count = 0
@@ -439,7 +451,6 @@ def bulk_set_modeled_by_cod_date(
 
         for project_id in project_ids:
             existing = links_by_project_id.get(project_id)
-
             if existing:
                 if bool(existing.IsModeled):
                     already_modeled_count += 1
@@ -457,7 +468,6 @@ def bulk_set_modeled_by_cod_date(
                 created_count += 1
 
         session.commit()
-
         return {
             "matched": len(project_ids),
             "updated": updated_count,
@@ -465,7 +475,6 @@ def bulk_set_modeled_by_cod_date(
             "changed": updated_count + created_count,
             "already_modeled": already_modeled_count,
         }
-
     except Exception:
         session.rollback()
         raise
