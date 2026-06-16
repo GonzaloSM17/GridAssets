@@ -1,11 +1,19 @@
-"""Excel export service — builds a per-type multi-sheet workbook."""
+"""Excel export service for project data.
+
+This module builds a multi-sheet workbook with one sheet per project type.
+It is intentionally defensive: if there are no projects yet, it still returns
+an Excel file with a visible placeholder sheet so Streamlit does not fail while
+rendering the download button.
+"""
 
 from __future__ import annotations
 
 import io
 from datetime import date
+from typing import Iterable
 
 import pandas as pd
+
 
 PROJECT_TYPE_SHEETS = {
     "transmission": "Transmisión",
@@ -21,20 +29,42 @@ def build_projects_excel(
     documents_df: pd.DataFrame,
     dates_df: pd.DataFrame,
 ) -> bytes:
-    """Return a .xlsx with one sheet per project type, each containing all data.
+    """Return an .xlsx workbook with project information.
 
-    Each sheet has: overview columns + type features + milestone dates (pivoted)
-    + legal documents (concatenated string).
+    The workbook normally contains one sheet per project type. If the database
+    has no projects yet, a placeholder sheet is created. This avoids the
+    openpyxl error: "At least one sheet must be visible".
     """
+    overview_df = _ensure_dataframe(overview_df)
+    features_df = _ensure_dataframe(features_df)
+    documents_df = _ensure_dataframe(documents_df)
+    dates_df = _ensure_dataframe(dates_df)
+
     buffer = io.BytesIO()
+    written_sheets = 0
 
     with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
         for type_key, sheet_name in PROJECT_TYPE_SHEETS.items():
             sheet_df = _build_type_sheet(
-                type_key, overview_df, features_df, documents_df, dates_df
+                project_type=type_key,
+                overview_df=overview_df,
+                features_df=features_df,
+                documents_df=documents_df,
+                dates_df=dates_df,
             )
-            if not sheet_df.empty:
-                sheet_df.to_excel(writer, sheet_name=sheet_name, index=False)
+
+            if sheet_df.empty:
+                continue
+
+            sheet_df.to_excel(writer, sheet_name=sheet_name, index=False)
+            written_sheets += 1
+
+        if written_sheets == 0:
+            _build_empty_workbook_sheet().to_excel(
+                writer,
+                sheet_name="Sin datos",
+                index=False,
+            )
 
     return buffer.getvalue()
 
@@ -46,75 +76,149 @@ def _build_type_sheet(
     documents_df: pd.DataFrame,
     dates_df: pd.DataFrame,
 ) -> pd.DataFrame:
-    disc_col = "project_discriminator"
+    """Build one export sheet for a specific project type."""
+    discriminator_column = "project_discriminator"
 
-    if disc_col not in overview_df.columns:
+    if overview_df.empty or discriminator_column not in overview_df.columns:
         return pd.DataFrame()
 
-    # 1. Base overview for this type
-    base = overview_df[overview_df[disc_col] == project_type].copy()
-    base = base.drop(columns=[disc_col], errors="ignore")
+    base = overview_df[overview_df[discriminator_column] == project_type].copy()
+    base = base.drop(columns=[discriminator_column], errors="ignore")
 
-    if base.empty:
+    if base.empty or "ProjectID" not in base.columns:
         return pd.DataFrame()
 
-    project_ids = set(base["ProjectID"])
+    project_ids = set(base["ProjectID"].dropna().tolist())
 
-    # 2. Type-specific features (drop all-null columns)
-    type_features = features_df[features_df["ProjectID"].isin(project_ids)].copy()
+    type_features = _filter_by_project_ids(features_df, project_ids)
     type_features = type_features.drop(columns=["ProjectType"], errors="ignore")
     type_features = type_features.dropna(axis=1, how="all")
 
-    # 3. Milestone dates — one column per (MilestoneName + SourceName)
-    type_dates = dates_df[dates_df["ProjectID"].isin(project_ids)].copy()
+    dates_pivot = _build_dates_pivot(dates_df, project_ids)
+    documents_series = _build_documents_series(documents_df, project_ids)
 
-    if not type_dates.empty and "MilestoneName" in type_dates.columns:
-        type_dates = type_dates.copy()
-        type_dates["_col"] = type_dates.apply(
-            lambda r: f"{r.get('MilestoneName', '')} ({r.get('SourceName', '')})",
-            axis=1,
-        )
-        # Keep first (most recent) record per ProjectID + milestone column
-        type_dates = type_dates.drop_duplicates(
-            subset=["ProjectID", "_col"], keep="first"
-        )
-        dates_pivot = type_dates.pivot(
-            index="ProjectID", columns="_col", values="DateValue"
-        ).reset_index()
-        dates_pivot.columns.name = None
-    else:
-        dates_pivot = pd.DataFrame({"ProjectID": list(project_ids)})
+    result = base.copy()
 
-    # 4. Legal documents — concatenated string per project
-    type_docs = documents_df[documents_df["ProjectID"].isin(project_ids)].copy()
+    if not type_features.empty and "ProjectID" in type_features.columns:
+        result = result.merge(type_features, on="ProjectID", how="left")
 
-    if not type_docs.empty:
+    if not dates_pivot.empty and "ProjectID" in dates_pivot.columns:
+        result = result.merge(dates_pivot, on="ProjectID", how="left")
 
-        def _concat(group: pd.DataFrame) -> str:
-            parts = []
-            for _, row in group.iterrows():
-                name = str(row.get("DocumentName", "") or "").strip()
-                dtype = str(row.get("DocumentType", "") or "").strip()
-                if name:
-                    parts.append(f"{dtype}: {name}" if dtype else name)
-            return "; ".join(parts)
-
-        docs_series = (
-            type_docs.groupby("ProjectID")
-            .apply(_concat, include_groups=False)
-            .reset_index()
-            .rename(columns={0: "Documentos"})
-        )
-    else:
-        docs_series = pd.DataFrame({"ProjectID": list(project_ids), "Documentos": ""})
-
-    # 5. Join all parts
-    result = base.merge(type_features, on="ProjectID", how="left")
-    result = result.merge(dates_pivot, on="ProjectID", how="left")
-    result = result.merge(docs_series, on="ProjectID", how="left")
+    if not documents_series.empty and "ProjectID" in documents_series.columns:
+        result = result.merge(documents_series, on="ProjectID", how="left")
 
     return result
 
 
+def _build_dates_pivot(
+    dates_df: pd.DataFrame,
+    project_ids: set) -> pd.DataFrame:
+    """Pivot project dates into one column per milestone/source."""
+    type_dates = _filter_by_project_ids(dates_df, project_ids)
+
+    required_columns = {"ProjectID", "MilestoneName", "DateValue"}
+    if type_dates.empty or not required_columns.issubset(type_dates.columns):
+        return pd.DataFrame({"ProjectID": list(project_ids)})
+
+    type_dates = type_dates.copy()
+    type_dates["_col"] = type_dates.apply(
+        lambda row: _build_milestone_column_name(row),
+        axis=1,
+    )
+
+    type_dates = type_dates.drop_duplicates(
+        subset=["ProjectID", "_col"],
+        keep="first",
+    )
+
+    dates_pivot = type_dates.pivot(
+        index="ProjectID",
+        columns="_col",
+        values="DateValue",
+    ).reset_index()
+    dates_pivot.columns.name = None
+
+    return dates_pivot
+
+
+def _build_documents_series(
+    documents_df: pd.DataFrame,
+    project_ids: set) -> pd.DataFrame:
+    """Concatenate legal documents into one text column per project."""
+    type_documents = _filter_by_project_ids(documents_df, project_ids)
+
+    if type_documents.empty or "ProjectID" not in type_documents.columns:
+        return pd.DataFrame({"ProjectID": list(project_ids), "Documentos": ""})
+
+    documents_series = (
+        type_documents.groupby("ProjectID")
+        .apply(_concat_documents, include_groups=False)
+        .reset_index()
+        .rename(columns={0: "Documentos"})
+    )
+
+    return documents_series
+
+
+def _concat_documents(group: pd.DataFrame) -> str:
+    """Return a compact legal-document summary for one project."""
+    parts = []
+
+    for _, row in group.iterrows():
+        name = str(row.get("DocumentName", "") or "").strip()
+        document_type = str(row.get("DocumentType", "") or "").strip()
+
+        if not name:
+            continue
+
+        if document_type:
+            parts.append(f"{document_type}: {name}")
+        else:
+            parts.append(name)
+
+    return "; ".join(parts)
+
+
+def _build_milestone_column_name(row: pd.Series) -> str:
+    """Build a human-readable date column name."""
+    milestone = str(row.get("MilestoneName", "") or "").strip()
+    source = str(row.get("SourceName", "") or "").strip()
+
+    if milestone and source:
+        return f"{milestone} ({source})"
+
+    return milestone or source or "Fecha"
+
+
+def _filter_by_project_ids(df: pd.DataFrame, project_ids: Iterable) -> pd.DataFrame:
+    """Return rows whose ProjectID belongs to project_ids, safely."""
+    if df.empty or "ProjectID" not in df.columns:
+        return pd.DataFrame({"ProjectID": list(project_ids)})
+
+    return df[df["ProjectID"].isin(project_ids)].copy()
+
+
+def _build_empty_workbook_sheet() -> pd.DataFrame:
+    """Return a visible placeholder sheet for an empty database."""
+    return pd.DataFrame(
+        {
+            "Estado": ["Sin proyectos"],
+            "Mensaje": [
+                "La base de datos está creada, pero aún no hay proyectos para exportar."
+            ],
+        }
+    )
+
+
+def _ensure_dataframe(value) -> pd.DataFrame:
+    """Normalize optional data into a pandas DataFrame."""
+    if isinstance(value, pd.DataFrame):
+        return value
+
+    return pd.DataFrame()
+
+
 def suggested_filename() -> str:
+    """Return the default Excel export filename."""
     return f"proyectos_sen_{date.today().strftime('%Y-%m-%d')}.xlsx"

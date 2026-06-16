@@ -1,8 +1,6 @@
 import pandas as pd
 import streamlit as st
 
-from html import escape
-
 from services.project_data_service import ProjectDataService
 from views.project_edit_view import ProjectEditView
 from views.project_modeling_view import ProjectModelingView
@@ -60,6 +58,7 @@ class ProjectDetailView:
     def render_project_detail(
         selected_project_id: int,
         current_nup: int | None,
+        current_status: str | None,
         features_df: pd.DataFrame,
         dates_df: pd.DataFrame,
         legal_documents_df: pd.DataFrame,
@@ -115,6 +114,11 @@ class ProjectDetailView:
                 project_id=selected_project_id,
                 project_dates=project_dates,
             )
+            st.divider()
+            ProjectEditView.render_status_editor(
+                project_id=selected_project_id,
+                current_status=current_status,
+            )
 
     @staticmethod
     def _render_features_tab(project_features: pd.DataFrame) -> None:
@@ -142,70 +146,31 @@ class ProjectDetailView:
             width="stretch",
             height=280,
             hide_index=True,
-            column_config=ProjectTableUtils.build_column_config(
-                project_legal_documents
-            ),
+            column_config=ProjectTableUtils.build_column_config(project_legal_documents),
         )
 
     @staticmethod
     def _render_dates_tab(project_dates: pd.DataFrame) -> None:
-        """Render project dates table with compact column widths."""
+        """Render relevant dates as a compact dataframe without long columns."""
         if project_dates.empty:
             st.info("No relevant dates are available for this project.")
             return
 
         visible_columns = [
             column
-            for column in [
-                "MilestoneName",
-                "DateValue",
-                "SourceName",
-                "ExtractedAt",
-                "URL",
-            ]
+            for column in ["MilestoneName", "DateValue", "SourceName", "ExtractedAt"]
             if column in project_dates.columns
         ]
-
         if not visible_columns:
             st.info("No relevant dates are available for this project.")
             return
 
         dates_view = project_dates[visible_columns].copy()
 
-        column_config = {
-            "MilestoneName": st.column_config.TextColumn(
-                "Hito",
-                width="medium",
-            ),
-            "DateValue": st.column_config.DateColumn(
-                "Fecha",
-                width="small",
-                format="DD-MM-YYYY",
-            ),
-            "SourceName": st.column_config.TextColumn(
-                "Fuente",
-                width="small",
-            ),
-            "ExtractedAt": st.column_config.DatetimeColumn(
-                "Extraído",
-                width="small",
-                format="DD-MM-YYYY",
-            ),
-            "URL": st.column_config.LinkColumn(
-                "Link",
-                width="small",
-                display_text="Abrir",
-            ),
-        }
-
         st.dataframe(
             dates_view,
             width="stretch",
             height=min(280, 38 + 35 * max(len(dates_view), 1)),
             hide_index=True,
-            column_config={
-                column: config
-                for column, config in column_config.items()
-                if column in dates_view.columns
-            },
+            column_config=ProjectTableUtils.build_column_config(dates_view),
         )

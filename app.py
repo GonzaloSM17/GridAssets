@@ -1,3 +1,8 @@
+from __future__ import annotations
+
+from typing import Optional
+
+import pandas as pd
 import streamlit as st
 
 from services.project_data_service import ProjectDataService
@@ -11,6 +16,8 @@ from views.scraper_view import ScraperView
 
 
 class ProjectApp:
+    """Main Streamlit application orchestrator."""
+
     def __init__(self) -> None:
         st.set_page_config(
             page_title=AppConfig.PAGE_TITLE,
@@ -19,8 +26,28 @@ class ProjectApp:
         )
 
     def run(self) -> None:
+        """Render the app, gating project data loads until the DB is ready."""
         AppStyle.apply()
         ProjectView.render_header()
+
+        db_status = DBStatusView.get_status()
+        db_ready = DBStatusView.is_ready(db_status)
+
+        if not db_ready:
+            self._render_top_row(
+                db_ready=False,
+                df=None,
+                project_types=[],
+                features_df=None,
+                dates_df=None,
+                legal_documents_df=None,
+            )
+            st.divider()
+            st.info(
+                "Primero valida o crea la base de datos y el schema desde "
+                "Gestión de base de datos. Luego se cargarán los proyectos."
+            )
+            return
 
         try:
             df = ProjectDataService.load_projects()
@@ -30,6 +57,7 @@ class ProjectApp:
             project_types = ProjectDataService.get_available_project_types(df)
 
             self._render_top_row(
+                db_ready=True,
                 df=df,
                 project_types=project_types,
                 features_df=features_df,
@@ -53,24 +81,31 @@ class ProjectApp:
 
     @staticmethod
     def _render_top_row(
-        df,
+        db_ready: bool,
+        df: Optional[pd.DataFrame],
         project_types: list[str],
-        features_df,
-        dates_df,
-        legal_documents_df,
+        features_df: Optional[pd.DataFrame],
+        dates_df: Optional[pd.DataFrame],
+        legal_documents_df: Optional[pd.DataFrame],
     ) -> None:
+        """Render summary, database management and electrical model panels."""
         summary_col, db_col, model_col = st.columns([1, 1, 1], gap="large")
 
         with summary_col:
             with st.expander(" Resumen", expanded=True):
-                ProjectView.render_summary_panel(df, project_types)
-                st.divider()
-                ProjectView.render_export_button(
-                    df,
-                    features_df,
-                    legal_documents_df,
-                    dates_df,
-                )
+                if db_ready and df is not None:
+                    ProjectView.render_summary_panel(df, project_types)
+                    st.divider()
+                    ProjectView.render_export_button(
+                        df,
+                        features_df if features_df is not None else pd.DataFrame(),
+                        legal_documents_df
+                        if legal_documents_df is not None
+                        else pd.DataFrame(),
+                        dates_df if dates_df is not None else pd.DataFrame(),
+                    )
+                else:
+                    st.info("Resumen disponible cuando la base esté operativa.")
 
         with db_col:
             with st.expander(" Gestión de base de datos", expanded=True):
@@ -81,13 +116,21 @@ class ProjectApp:
                 st.divider()
                 DBStatusView.render_status_panel()
                 st.divider()
-                CNEIngestionView.render_cne_panel_column()
+
+                if db_ready:
+                    CNEIngestionView.render_cne_panel_column()
+                else:
+                    st.info("Carga CNE disponible después de crear la base y el schema.")
 
         with model_col:
-            ElectricalModelView.render_electrical_model_management_panel(
-                compact=True,
-                expanded=True,
-            )
+            if db_ready:
+                ElectricalModelView.render_electrical_model_management_panel(
+                    compact=True,
+                    expanded=True,
+                )
+            else:
+                with st.expander(" Gestión modelos eléctricos", expanded=True):
+                    st.info("Gestión de modelos disponible cuando la base esté operativa.")
 
 
 if __name__ == "__main__":
