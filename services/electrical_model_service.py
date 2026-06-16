@@ -8,12 +8,16 @@ from sqlalchemy import text
 from sqlalchemy.orm import sessionmaker
 
 from database.db_connection import get_sqlserver_engine
-from database.db_orm_model import ElectricalModel, Project, ProjectElectricalModel, Software
-
+from database.db_orm_model import (
+    ElectricalModel,
+    Project,
+    ProjectElectricalModel,
+    Software,
+)
 
 DEFAULT_SOFTWARE_NAMES = [
     "DIgSILENT PowerFactory",
-    "PSS/E",
+    "PSS/e",
     "PSCAD",
     "EMTP-RV",
 ]
@@ -53,10 +57,7 @@ def ensure_default_software() -> None:
 def _ensure_default_software(session) -> None:
     """Internal helper to create default software records inside an open session."""
 
-    existing_names = {
-        row.SoftwareName
-        for row in session.query(Software).all()
-    }
+    existing_names = {row.SoftwareName for row in session.query(Software).all()}
 
     for software_name in DEFAULT_SOFTWARE_NAMES:
         if software_name not in existing_names:
@@ -110,19 +111,16 @@ def list_models(include_inactive: bool = False) -> pd.DataFrame:
         _ensure_default_software(session)
         session.commit()
 
-        query = (
-            session.query(ElectricalModel, Software)
-            .join(Software, ElectricalModel.SoftwareID == Software.SoftwareID)
+        query = session.query(ElectricalModel, Software).join(
+            Software, ElectricalModel.SoftwareID == Software.SoftwareID
         )
 
         if not include_inactive:
             query = query.filter(ElectricalModel.IsActive == 1)
 
-        rows = (
-            query
-            .order_by(Software.SoftwareName, ElectricalModel.ElectricalModelName)
-            .all()
-        )
+        rows = query.order_by(
+            Software.SoftwareName, ElectricalModel.ElectricalModelName
+        ).all()
 
         return pd.DataFrame(
             [
@@ -232,8 +230,7 @@ def get_project_modeling_status(project_id: int) -> pd.DataFrame:
         )
 
         modeled_by_model_id = {
-            int(link.ElectricalModelID): bool(link.IsModeled)
-            for link in links
+            int(link.ElectricalModelID): bool(link.IsModeled) for link in links
         }
 
         return pd.DataFrame(
@@ -317,8 +314,7 @@ def preview_projects_for_bulk_modeling_by_cod(
 
     only_unmodeled_int = 1 if only_unmodeled else 0
 
-    query = text(
-        """
+    query = text("""
         WITH LatestCOD AS (
             SELECT
                 p.ProjectID,
@@ -364,8 +360,7 @@ def preview_projects_for_bulk_modeling_by_cod(
                 OR ISNULL(pem.IsModeled, 0) = 0
             )
         ORDER BY c.COD_Actual DESC, c.ProjectID;
-        """
-    )
+        """)
 
     engine = get_sqlserver_engine()
 
@@ -436,10 +431,7 @@ def bulk_set_modeled_by_cod_date(
             .all()
         )
 
-        links_by_project_id = {
-            int(link.ProjectID): link
-            for link in existing_links
-        }
+        links_by_project_id = {int(link.ProjectID): link for link in existing_links}
 
         created_count = 0
         updated_count = 0
