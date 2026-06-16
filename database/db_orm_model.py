@@ -12,7 +12,7 @@ from sqlalchemy import (
     Float,
     DateTime,
     Boolean,
-    Text,
+    UniqueConstraint,
 )
 from sqlalchemy.orm import relationship, declarative_base
 
@@ -68,12 +68,27 @@ class MilestoneType(Base):
 
 
 class Source(Base):
-    """CNE, PGP, SEO, Manual"""
+    """CNE, PGP, SEO, User"""
 
     __tablename__ = "Source"
 
     SourceID = Column(Integer, primary_key=True)
     SourceName = Column(String(100), nullable=False, unique=True)
+
+
+class Technology(Base):
+    """Technology lookup table for generation, DER and BESS projects."""
+
+    __tablename__ = "Technology"
+
+    TechnologyID = Column(Integer, primary_key=True, autoincrement=True)
+    TechnologyName = Column(String(120), nullable=False, unique=True)
+    TechnologyGroup = Column(String(80), nullable=True)
+    IsActive = Column(Boolean, nullable=False, default=True)
+
+    generation_projects = relationship("GenerationProject", back_populates="technology")
+    der_projects = relationship("DERProject", back_populates="technology")
+    bess_projects = relationship("BESSProject", back_populates="technology")
 
 
 # ==================== CORE PROJECT TABLE ====================
@@ -133,13 +148,15 @@ class GenerationProject(Project):
     ProjectID = Column(Integer, ForeignKey("Project.ProjectID"), nullable=False)
     BayID = Column(Integer, ForeignKey("Bay.BayID"), nullable=True)
 
-    Technology = Column(String(100), nullable=True)
+    TechnologyID = Column(Integer, ForeignKey("Technology.TechnologyID"), nullable=True)
+
     PowerCapacity = Column(Float, nullable=True)
-    TotalCapacity = Column(String(50), nullable=True)
+    TotalCapacity = Column(Float, nullable=True)
     Location = Column(String(255), nullable=True)
 
     # Relationships
     bay = relationship("Bay", backref="generation_projects")
+    technology = relationship("Technology", back_populates="generation_projects")
 
     __mapper_args__ = {
         "polymorphic_identity": "generation",
@@ -155,13 +172,15 @@ class DERProject(Project):
     ProjectID = Column(Integer, ForeignKey("Project.ProjectID"), nullable=False)
     BayID = Column(Integer, ForeignKey("Bay.BayID"), nullable=True)
 
-    Technology = Column(String(100), nullable=True)
+    TechnologyID = Column(Integer, ForeignKey("Technology.TechnologyID"), nullable=True)
+
     PowerCapacity = Column(Float, nullable=True)
-    TotalCapacity = Column(String(50), nullable=True)
+    TotalCapacity = Column(Float, nullable=True)
     Location = Column(String(255), nullable=True)
 
     # Relationships
     bay = relationship("Bay", backref="der_projects")
+    technology = relationship("Technology", back_populates="der_projects")
 
     __mapper_args__ = {
         "polymorphic_identity": "der",
@@ -177,14 +196,15 @@ class BESSProject(Project):
     ProjectID = Column(Integer, ForeignKey("Project.ProjectID"), nullable=False)
     BayID = Column(Integer, ForeignKey("Bay.BayID"), nullable=True)
 
-    Technology = Column(String(100), nullable=True)
+    TechnologyID = Column(Integer, ForeignKey("Technology.TechnologyID"), nullable=True)
+
     PowerCapacity = Column(Float, nullable=True)
-    StorageCapacity = Column(String(50), nullable=True)
+    StorageCapacity = Column(Float, nullable=True)
     Location = Column(String(255), nullable=True)
 
     # Relationships
     bay = relationship("Bay", backref="bess_projects")
-
+    technology = relationship("Technology", back_populates="bess_projects")
     __mapper_args__ = {
         "polymorphic_identity": "bess",
     }
@@ -244,3 +264,58 @@ class RelevantDate(Base):
     project = relationship("Project", backref="relevant_dates")
     milestone_type = relationship("MilestoneType", backref="dates")
     source = relationship("Source", backref="dates")
+
+
+# ==================== Electrical Model ====================
+DEFAULT_SOFTWARES = [
+    "DIgSILENT PowerFactory",
+    "PSS/E",
+    "PSCAD",
+    "EMTP-RV",
+]
+
+
+class Software(Base):
+    __tablename__ = "Software"
+
+    SoftwareID = Column(Integer, primary_key=True, autoincrement=True)
+    SoftwareName = Column(String(120), nullable=False, unique=True)
+    IsActive = Column(Boolean, nullable=False, default=True)
+
+
+class ElectricalModel(Base):
+    __tablename__ = "ElectricalModel"
+
+    ElectricalModelID = Column(Integer, primary_key=True, autoincrement=True)
+    ElectricalModelName = Column(String(255), nullable=False)
+    SoftwareID = Column(Integer, ForeignKey("Software.SoftwareID"), nullable=False)
+    SoftwareVersion = Column(String(80), nullable=True)
+    Description = Column(String(500), nullable=True)
+    IsActive = Column(Boolean, nullable=False, default=True)
+
+    software = relationship("Software", backref="electrical_models")
+
+
+class ProjectElectricalModel(Base):
+    __tablename__ = "ProjectElectricalModel"
+
+    ProjectElectricalModelID = Column(Integer, primary_key=True, autoincrement=True)
+    ProjectID = Column(Integer, ForeignKey("Project.ProjectID"), nullable=False)
+    ElectricalModelID = Column(
+        Integer,
+        ForeignKey("ElectricalModel.ElectricalModelID"),
+        nullable=False,
+    )
+    IsModeled = Column(Boolean, nullable=False, default=False)
+    Notes = Column(String(500), nullable=True)
+
+    project = relationship("Project", backref="electrical_model_links")
+    electrical_model = relationship("ElectricalModel", backref="project_links")
+
+    __table_args__ = (
+        UniqueConstraint(
+            "ProjectID",
+            "ElectricalModelID",
+            name="UQ_ProjectElectricalModel_Project_Model",
+        ),
+    )

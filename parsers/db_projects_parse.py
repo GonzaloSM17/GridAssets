@@ -1,16 +1,20 @@
 # db_projects_parse.py
-"""
-CNE Excel project parser.
+"""CNE Excel project parser.
 
 This module reads the monthly CNE construction declaration workbook and converts
 its project rows into dataclasses used by the database population layer.
 
-Main improvements over the first version:
-- Accepts an explicit file path, not only a filename inside ./temp.
-- Keeps backwards compatibility with ProjectParser(filename="...").
-- Parses CNE/Excel dates safely, including Excel serial dates.
-- Tracks a lightweight parsing report for UI previews and ingestion validation.
+Responsibilities:
+- Accept an explicit file path or a legacy filename.
+- Read CNE Excel sheets.
+- Normalize project names.
+- Parse dates safely, including Excel serial dates.
+- Parse numeric capacities as float values.
+- Preserve source technology text so TechnologyResolver can normalize it later.
+- Produce a lightweight parse report for UI previews and ingestion validation.
 """
+
+from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
@@ -21,12 +25,19 @@ import unicodedata
 
 import pandas as pd
 
+from services.numeric_value_parser import NumericValueParser
+from services.project_name_normalizer import ProjectNameNormalizer
+
+# ==================== DATACLASSES ====================
+
 
 @dataclass
 class UnderConstructionProject:
-    name: str = None
-    project_entity: str = None
-    cod: date = None
+    """Base CNE project dataclass."""
+
+    name: Optional[str] = None
+    project_entity: Optional[str] = None
+    cod: Optional[date] = None
 
     # PGP portal data
     pgp_NUP: Optional[int] = None
@@ -39,58 +50,71 @@ class UnderConstructionProject:
 
 @dataclass
 class TransmissionProject(UnderConstructionProject):
-    type: str = None
-    description: str = None
+    """Transmission project parsed from CNE workbook."""
 
-    act: str = None
-    act_award: str = None
-    resolution_exempt: str = None
+    type: Optional[str] = None
+    description: Optional[str] = None
 
-    voltage_level: str = None
-    total_capacity: str = None
+    act: Optional[str] = None
+    act_award: Optional[str] = None
+    resolution_exempt: Optional[str] = None
 
-    # Construction tracking data
-    tracking_construction_start: date = None
-    tracking_cod_planned: date = None
+    voltage_level: Optional[str] = None
+    total_capacity: Optional[float] = None
+
+    tracking_construction_start: Optional[date] = None
+    tracking_cod_planned: Optional[date] = None
 
 
 @dataclass
 class GridScaleProject(UnderConstructionProject):
-    power_capacity: float = None
-    resolution: str = None
-    location: str = None
-    bay: str = None
+    """Base dataclass for generation, DER and BESS-like projects."""
+
+    power_capacity: Optional[float] = None
+    resolution: Optional[str] = None
+    location: Optional[str] = None
+    bay: Optional[str] = None
 
 
 @dataclass
 class GeneratorProject(GridScaleProject):
-    total_capacity: str = None
-    technology: str = None
+    """Generation project parsed from CNE workbook."""
+
+    total_capacity: Optional[float] = None
+    technology: Optional[str] = None
 
 
 @dataclass
 class DERProject(GridScaleProject):
-    total_capacity: str = None
-    technology: str = None
+    """DER / PMGD project parsed from CNE workbook."""
+
+    total_capacity: Optional[float] = None
+    technology: Optional[str] = None
 
 
 @dataclass
 class BESSProject(GridScaleProject):
-    technology: str = None
-    storage_capacity: str = None
+    """BESS project parsed from CNE workbook."""
+
+    technology: Optional[str] = None
+    storage_capacity: Optional[float] = None
 
 
 @dataclass
 class ParseReport:
-    input_file: str = None
+    """Lightweight parsing report for UI previews and ingestion validation."""
+
+    input_file: Optional[str] = None
     available_sheets: List[str] = field(default_factory=list)
     missing_sheets: List[str] = field(default_factory=list)
     parsed_rows_by_sheet: Dict[str, int] = field(default_factory=dict)
     dropped_rows_by_sheet: Dict[str, int] = field(default_factory=dict)
     missing_columns_by_sheet: Dict[str, List[str]] = field(default_factory=dict)
     invalid_dates: List[Dict[str, Any]] = field(default_factory=list)
+    invalid_numeric_values: List[Dict[str, Any]] = field(default_factory=list)
 
     def as_dict(self) -> Dict[str, Any]:
+        """Return report as a JSON-friendly dictionary."""
         return {
             "input_file": self.input_file,
             "available_sheets": self.available_sheets,
@@ -99,7 +123,11 @@ class ParseReport:
             "dropped_rows_by_sheet": self.dropped_rows_by_sheet,
             "missing_columns_by_sheet": self.missing_columns_by_sheet,
             "invalid_dates": self.invalid_dates,
+            "invalid_numeric_values": self.invalid_numeric_values,
         }
+
+
+# ==================== PARSER ====================
 
 
 class ProjectParser:
@@ -122,12 +150,19 @@ class ProjectParser:
 
     EXPECTED_SHEETS = list(SHEET_CONFIG.keys())
 
+    NUMERIC_ATTRIBUTES = {
+        "power_capacity",
+        "storage_capacity",
+        "total_capacity",
+    }
+
     def __init__(
         self,
         filename: Optional[str] = None,
         file_path: Optional[Union[str, Path]] = None,
         debug: bool = False,
     ):
+        """Create parser from filename or explicit file path."""
         if file_path is None and filename is None:
             raise ValueError("Either filename or file_path must be provided.")
 
@@ -135,6 +170,7 @@ class ProjectParser:
         self.input_name = filename or Path(file_path).name
         self.file_path = self._resolve_file_path(file_path or filename)
         self.report = ParseReport(input_file=str(self.file_path))
+
         self._load_file()
 
         self.transmission_projects = self._storage_transmission_projects()
@@ -142,12 +178,17 @@ class ProjectParser:
         self.der_projects = self._storage_der_projects()
         self.bess_projects = self._storage_bess_projects()
 
-    # ---------------- File handling ----------------
+    # ------------------------------------------------------------------
+    # File handling
+    # ------------------------------------------------------------------
 
     def _resolve_file_path(self, raw_path: Union[str, Path]) -> Path:
+        """Resolve workbook path from absolute, relative or legacy temp location."""
         candidate = Path(raw_path).expanduser()
+
         if candidate.is_absolute() and candidate.exists():
             return candidate
+
         if candidate.exists():
             return candidate.resolve()
 
@@ -166,21 +207,33 @@ class ProjectParser:
         raise FileNotFoundError(f"CNE Excel file not found: {raw_path}")
 
     def _load_file(self) -> None:
+        """Load workbook metadata."""
         self.file = pd.ExcelFile(self.file_path)
         self.sheets = self.file.sheet_names
+
         self.report.available_sheets = list(self.sheets)
         self.report.missing_sheets = [
             sheet for sheet in self.EXPECTED_SHEETS if sheet not in self.sheets
         ]
 
     def _open_data(self, sheet_name: str) -> pd.DataFrame:
+        """Open a configured CNE sheet and return clean candidate project rows."""
         if sheet_name not in self.sheets:
             return pd.DataFrame()
 
-        raw_df = self.file.parse(sheet_name, dtype=object, **self.SHEET_CONFIG[sheet_name])
+        raw_df = self.file.parse(
+            sheet_name,
+            dtype=object,
+            **self.SHEET_CONFIG[sheet_name],
+        )
         original_rows = len(raw_df)
 
-        raw_df.columns = [str(col).strip().lower() for col in raw_df.columns]
+        raw_df.columns = [str(column).strip().lower() for column in raw_df.columns]
+
+        if "proyecto" not in raw_df.columns:
+            self.report.missing_columns_by_sheet[sheet_name] = ["proyecto"]
+            return pd.DataFrame()
+
         df = raw_df.dropna(subset=["proyecto"]).copy()
 
         if "propietario" in df.columns:
@@ -188,88 +241,130 @@ class ProjectParser:
 
         self.report.dropped_rows_by_sheet[sheet_name] = original_rows - len(df)
 
-        df["proyecto"] = (
-            df["proyecto"]
-            .astype(str)
-            .str.replace(r"[\r\n]+", " ", regex=True)
-            .str.replace(r"\bSE\b", "S/E", regex=True)
-            .str.replace(r"\s*-\s*", " – ", regex=True)
-            .str.replace(r"\s+", " ", regex=True)
-            .str.strip()
-        )
-
-        for column in [
-            "capacidad instalada [mw]",
-            "potencia",
-            "potencia neta [mw]",
-            "capacidad de almacenamiento [mwh]",
-        ]:
-            if column in df.columns:
-                df[column] = df[column].apply(self._clean_decimal_text)
+        df["proyecto"] = df["proyecto"].apply(self._clean_project_name)
 
         return df.reset_index(drop=True)
 
-    # ---------------- Utils ----------------
+    # ------------------------------------------------------------------
+    # Public report helpers
+    # ------------------------------------------------------------------
+
+    def get_report(self) -> Dict[str, Any]:
+        """Return parser report as dictionary."""
+        return self.report.as_dict()
+
+    def get_project_counts(self) -> Dict[str, int]:
+        """Return parsed project counts by project family."""
+        return {
+            "transmission": len(self.transmission_projects),
+            "generation": len(self.generation_projects),
+            "der": len(self.der_projects),
+            "bess": len(self.bess_projects),
+            "total": (
+                len(self.transmission_projects)
+                + len(self.generation_projects)
+                + len(self.der_projects)
+                + len(self.bess_projects)
+            ),
+        }
+
+    # ------------------------------------------------------------------
+    # Generic utilities
+    # ------------------------------------------------------------------
 
     @staticmethod
     def _normalize_string(value: Any) -> str:
+        """Normalize text for accent-insensitive matching."""
         value = "" if value is None else str(value)
         value = unicodedata.normalize("NFKD", value.strip().lower())
-        return "".join(c for c in value if not unicodedata.combining(c))
-
-    def _find_candidate(self, columns: List[str], criteria: List[str]) -> Optional[str]:
-        for col in columns:
-            col_norm = self._normalize_string(col)
-            if all(c in col_norm for c in criteria):
-                return col
-        return None
+        return "".join(char for char in value if not unicodedata.combining(char))
 
     @staticmethod
-    def _clean_decimal_text(value: Any) -> Optional[str]:
+    def _clean_project_name(value: Any) -> str:
+        """Clean and normalize project name text."""
+        normalized = ProjectNameNormalizer.normalize(value)
+        return normalized or ""
+
+    def _find_candidate(self, columns: List[str], criteria: List[str]) -> Optional[str]:
+        """Find first column containing all normalized criteria terms."""
+        for column in columns:
+            column_normalized = self._normalize_string(column)
+            if all(criteria_item in column_normalized for criteria_item in criteria):
+                return column
+
+        return None
+
+    def _get_val(
+        self,
+        row: pd.Series,
+        col_map: Dict[str, Optional[str]],
+        attr: str,
+    ) -> Any:
+        """Return raw row value for a mapped attribute."""
+        column = col_map.get(attr)
+
+        if not column or column not in row:
+            return None
+
+        value = row[column]
+
         if pd.isna(value):
             return None
-        text = str(value).strip()
-        if not text or text.lower() in {"nan", "none"}:
-            return None
-        return text.replace(",", ".")
 
-    def _get_val(self, row, col_map, attr):
-        col = col_map.get(attr)
-        if col and col in row and pd.notna(row[col]):
-            return row[col]
-        return None
+        return value
+
+    @staticmethod
+    def _clean_text(value: Any) -> Optional[str]:
+        """Return stripped text or None."""
+        if value is None or pd.isna(value):
+            return None
+
+        text = str(value).strip()
+
+        if not text or text.lower() in {"nan", "none", "nat"}:
+            return None
+
+        return text
+
+    @staticmethod
+    def _clean_voltage(value: Any) -> Optional[str]:
+        """Clean voltage value."""
+        if value is None or pd.isna(value):
+            return None
+
+        text = str(value).lower()
+        text = text.replace("kv", "")
+        text = text.replace(" ", "")
+
+        return text.strip() or None
+
+    # ------------------------------------------------------------------
+    # Date parsing
+    # ------------------------------------------------------------------
 
     @staticmethod
     def _excel_serial_to_date(value: Union[int, float]) -> Optional[date]:
-        """Convert Excel serial date numbers to Python date objects.
-
-        Excel's 1900 date system includes a historical leap-year bug. The common
-        Python conversion uses 1899-12-30 as the origin, which matches pandas and
-        Excel for practical modern dates.
-        """
+        """Convert Excel serial date numbers to Python date objects."""
         if value is None or not math.isfinite(float(value)):
             return None
+
         if value < 1:
             return None
+
         return (datetime(1899, 12, 30) + timedelta(days=float(value))).date()
 
     @classmethod
     def _parse_date(cls, value: Any) -> Optional[date]:
-        """Parse a CNE date value and return a date object.
-
-        Handles:
-        - datetime/date/Timestamp values
-        - Excel serial dates such as 44348
-        - ISO dates such as 2021-06-01
-        - Chilean day-first dates such as 01-06-2021 or 01/06/2021
-        """
+        """Parse a CNE date value and return a date object."""
         if value is None or pd.isna(value):
             return None
 
         if isinstance(value, pd.Timestamp):
             return value.date()
+
         if isinstance(value, datetime):
             return value.date()
+
         if isinstance(value, date):
             return value
 
@@ -280,10 +375,12 @@ class ProjectParser:
 
         if isinstance(value, str):
             text = value.strip()
+
             if not text or text.lower() in {"nan", "none", "nat"}:
                 return None
 
             normalized_number = text.replace(",", ".")
+
             try:
                 numeric_value = float(normalized_number)
                 if 20000 <= numeric_value <= 80000:
@@ -302,9 +399,10 @@ class ProjectParser:
                 "%d-%m-%Y",
                 "%d.%m.%Y",
             ]
-            for fmt in explicit_formats:
+
+            for date_format in explicit_formats:
                 try:
-                    return datetime.strptime(text, fmt).date()
+                    return datetime.strptime(text, date_format).date()
                 except ValueError:
                     continue
 
@@ -319,11 +417,14 @@ class ProjectParser:
         """Parse compact Spanish month-year values such as mar-26."""
         text = ProjectParser._normalize_string(value)
         text = text.replace(".", "").replace("/", "-").replace(" ", "-")
+
         parts = [part for part in text.split("-") if part]
+
         if len(parts) != 2:
             return None
 
         month_text, year_text = parts
+
         spanish_months = {
             "ene": 1,
             "enero": 1,
@@ -353,54 +454,30 @@ class ProjectParser:
         }
 
         month = spanish_months.get(month_text)
+
         if month is None or not year_text.isdigit():
             return None
 
         year = int(year_text)
+
         if year < 100:
             year += 2000 if year < 70 else 1900
 
         return date(year, month, 1)
 
-
-    @staticmethod
-    def _safe_float(value) -> Optional[float]:
-        try:
-            return float(str(value).replace(",", "."))
-        except (TypeError, ValueError):
-            return None
-
-    @staticmethod
-    def _clean_voltage(value) -> str:
-        if value is None or pd.isna(value):
-            return ""
-        text = str(value).lower()
-        text = text.replace("kv", "")
-        text = text.replace(" ", "")
-        return text.strip()
-
-    # ---------------- Report helpers ----------------
-
-    def get_report(self) -> Dict[str, Any]:
-        return self.report.as_dict()
-
-    def get_project_counts(self) -> Dict[str, int]:
-        return {
-            "transmission": len(self.transmission_projects),
-            "generation": len(self.generation_projects),
-            "der": len(self.der_projects),
-            "bess": len(self.bess_projects),
-            "total": (
-                len(self.transmission_projects)
-                + len(self.generation_projects)
-                + len(self.der_projects)
-                + len(self.bess_projects)
-            ),
-        }
+    # ------------------------------------------------------------------
+    # Report recorders
+    # ------------------------------------------------------------------
 
     def _record_invalid_date(
-        self, sheet: str, row_index: int, attr: str, column: str, raw_value: Any
+        self,
+        sheet: str,
+        row_index: int,
+        attr: str,
+        column: Optional[str],
+        raw_value: Any,
     ) -> None:
+        """Record date parsing issue."""
         self.report.invalid_dates.append(
             {
                 "sheet": sheet,
@@ -411,7 +488,28 @@ class ProjectParser:
             }
         )
 
-    # ---------------- Generic parser ----------------
+    def _record_invalid_numeric_value(
+        self,
+        sheet: str,
+        row_index: int,
+        attr: str,
+        column: Optional[str],
+        raw_value: Any,
+    ) -> None:
+        """Record numeric parsing issue."""
+        self.report.invalid_numeric_values.append(
+            {
+                "sheet": sheet,
+                "row_index": int(row_index),
+                "attribute": attr,
+                "column": column,
+                "raw_value": str(raw_value),
+            }
+        )
+
+    # ------------------------------------------------------------------
+    # Generic parser
+    # ------------------------------------------------------------------
 
     def _parse_projects(
         self,
@@ -421,69 +519,94 @@ class ProjectParser:
         extra_handler=None,
         debug: Optional[bool] = None,
     ) -> List[UnderConstructionProject]:
+        """Parse configured sheets into project dataclass instances."""
         if debug is None:
             debug = self.debug
 
         clean_criteria = {
-            k: [self._normalize_string(c) for c in v] for k, v in raw_criteria.items()
+            attr: [self._normalize_string(criteria) for criteria in criteria_list]
+            for attr, criteria_list in raw_criteria.items()
         }
 
         projects = []
 
         for sheet in sheets:
             df = self._open_data(sheet)
+
             if df.empty:
                 continue
 
             col_map = {
-                attr: self._find_candidate(df.columns.tolist(), crit)
-                for attr, crit in clean_criteria.items()
+                attr: self._find_candidate(df.columns.tolist(), criteria)
+                for attr, criteria in clean_criteria.items()
             }
 
-            missing_columns = [attr for attr, col in col_map.items() if col is None]
+            missing_columns = [
+                attr for attr, column in col_map.items() if column is None
+            ]
+
             if missing_columns:
                 self.report.missing_columns_by_sheet[sheet] = missing_columns
 
             if debug:
                 print(f"\nSheet: {sheet}")
                 print("Columns found:")
-                for attr, col in col_map.items():
-                    print(f"  {attr:20} -> {col}")
+
+                for attr, column in col_map.items():
+                    print(f"  {attr:20} -> {column}")
 
             parsed_count = 0
+
             for row_index, row in df.iterrows():
                 project = model()
 
                 for attr in col_map:
-                    val = self._get_val(row, col_map, attr)
+                    raw_value = self._get_val(row, col_map, attr)
 
                     if attr == "cod":
-                        parsed_date = self._parse_date(val)
+                        parsed_date = self._parse_date(raw_value)
                         setattr(project, attr, parsed_date)
 
-                        if val is not None and parsed_date is None:
+                        if raw_value is not None and parsed_date is None:
                             self._record_invalid_date(
                                 sheet=sheet,
                                 row_index=row_index,
                                 attr=attr,
                                 column=col_map.get(attr),
-                                raw_value=val,
+                                raw_value=raw_value,
                             )
 
-                        if debug and val is not None:
+                        if debug and raw_value is not None:
                             print(
-                                f"Parsed {attr}: {val!r} ({type(val).__name__}) -> {parsed_date}"
+                                f"Parsed {attr}: {raw_value!r} "
+                                f"({type(raw_value).__name__}) -> {parsed_date}"
                             )
-                    elif attr in (
-                        "power_capacity",
-                        "storage_capacity",
-                        "total_capacity",
-                    ):
-                        setattr(project, attr, self._clean_decimal_text(val))
-                    elif isinstance(val, str):
-                        setattr(project, attr, val.strip())
-                    elif val is not None:
-                        setattr(project, attr, val)
+
+                        continue
+
+                    if attr in self.NUMERIC_ATTRIBUTES:
+                        parsed_number = NumericValueParser.parse_float(raw_value)
+                        setattr(project, attr, parsed_number)
+
+                        if raw_value is not None and parsed_number is None:
+                            self._record_invalid_numeric_value(
+                                sheet=sheet,
+                                row_index=row_index,
+                                attr=attr,
+                                column=col_map.get(attr),
+                                raw_value=raw_value,
+                            )
+
+                        if debug and raw_value is not None:
+                            print(
+                                f"Parsed {attr}: {raw_value!r} "
+                                f"({type(raw_value).__name__}) -> {parsed_number}"
+                            )
+
+                        continue
+
+                    cleaned_text = self._clean_text(raw_value)
+                    setattr(project, attr, cleaned_text)
 
                 if extra_handler:
                     extra_handler(project, row, col_map, sheet)
@@ -495,12 +618,16 @@ class ProjectParser:
 
         return projects
 
-    # ---------------- Specific parser ----------------
+    # ------------------------------------------------------------------
+    # Specific project parsers
+    # ------------------------------------------------------------------
 
     def _storage_transmission_projects(self) -> List[TransmissionProject]:
-        def handler(p, row, col_map, sheet):
-            p.type = sheet
-            p.voltage_level = self._clean_voltage(
+        """Parse all transmission sheets."""
+
+        def handler(project, row, col_map, sheet):
+            project.type = sheet
+            project.voltage_level = self._clean_voltage(
                 self._get_val(row, col_map, "voltage_level")
             )
 
@@ -528,13 +655,33 @@ class ProjectParser:
                 "total_capacity": ["potencia"],
                 "voltage_level": ["tensión"],
             },
+            extra_handler=handler,
         )
 
     def _storage_generation_projects(self) -> List[GeneratorProject]:
+        """Parse generation sheet."""
         return self._parse_projects(
-            ["P.Generación"],
-            GeneratorProject,
-            {
+            sheets=["P.Generación"],
+            model=GeneratorProject,
+            raw_criteria={
+                "name": ["proyecto"],
+                "project_entity": ["propietario"],
+                "resolution": ["resolución"],
+                "cod": ["fecha", "estimada"],
+                "power_capacity": ["potencia", "neta"],
+                "total_capacity": ["capacidad", "instalada"],
+                "location": ["ubicación"],
+                "technology": ["tecnología"],
+                "bay": ["punto", "conexión"],
+            },
+        )
+
+    def _storage_der_projects(self) -> List[DERProject]:
+        """Parse PMGD / DER sheet."""
+        return self._parse_projects(
+            sheets=["PMGD"],
+            model=DERProject,
+            raw_criteria={
                 "name": ["proyecto"],
                 "project_entity": ["propietario"],
                 "resolution": ["resolución"],
@@ -548,10 +695,11 @@ class ProjectParser:
         )
 
     def _storage_bess_projects(self) -> List[BESSProject]:
+        """Parse BESS sheet."""
         return self._parse_projects(
-            ["BESS"],
-            BESSProject,
-            {
+            sheets=["BESS"],
+            model=BESSProject,
+            raw_criteria={
                 "name": ["proyecto"],
                 "project_entity": ["propietario"],
                 "resolution": ["resolución"],
@@ -564,27 +712,12 @@ class ProjectParser:
             },
         )
 
-    def _storage_der_projects(self) -> List[DERProject]:
-        return self._parse_projects(
-            ["PMGD"],
-            DERProject,
-            {
-                "name": ["proyecto"],
-                "project_entity": ["propietario"],
-                "resolution": ["resolución"],
-                "cod": ["fecha", "estimada"],
-                "power_capacity": ["potencia", "neta"],
-                "total_capacity": ["capacidad", "instalada"],
-                "location": ["ubicación"],
-                "technology": ["tecnología"],
-                "bay": ["punto", "conexión"],
-            },
-        )
-
 
 if __name__ == "__main__":
     parser = ProjectParser(filename="Tablas-Declaracion-Construccion-Enero-2026.xlsx")
+
     print("Project counts:")
     print(parser.get_project_counts())
+
     print("Parse report:")
     print(parser.get_report())

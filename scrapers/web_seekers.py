@@ -269,7 +269,9 @@ class PGPSeeker(WebScraper):
                 .first()
             )
             if not milestone:
-                raise RuntimeError(f"Missing required MilestoneType row: {milestone_name}")
+                raise RuntimeError(
+                    f"Missing required MilestoneType row: {milestone_name}"
+                )
 
             existing = (
                 session.query(RelevantDate)
@@ -350,6 +352,7 @@ class PGPSeeker(WebScraper):
             ["Linea ", "Línea ", "LT "],
             ["Lineas", "Líneas", "LT"],
             ["º", "°"],
+            [" kV", "kV"],
         ]
 
         applicable_groups = []
@@ -451,14 +454,12 @@ class SEOSeeker(WebScraper):
                 )
                 self.page.wait_for_timeout(2000)
 
-                has_options = self.page.evaluate(
-                    """
+                has_options = self.page.evaluate("""
                     () => {
                         const list = document.querySelector('datalist#dynmicName');
                         return list && list.options.length > 0;
                     }
-                    """
-                )
+                    """)
                 if has_options:
                     return True
 
@@ -548,7 +549,9 @@ class SEOSeeker(WebScraper):
                 .first()
             )
             if not milestone:
-                raise RuntimeError(f"Missing required MilestoneType row: {milestone_name}")
+                raise RuntimeError(
+                    f"Missing required MilestoneType row: {milestone_name}"
+                )
 
             existing = (
                 session.query(RelevantDate)
