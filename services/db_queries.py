@@ -64,6 +64,7 @@ SELECT
     tp.TotalCapacity AS TransmissionTotalCapacity,
     NULL AS BayName,
     NULL AS Technology,
+    NULL AS TechnologyGroup,
     NULL AS PowerCapacity,
     NULL AS GenerationTotalCapacity,
     NULL AS StorageCapacity,
@@ -80,7 +81,8 @@ SELECT
     NULL AS VoltageLevel,
     NULL AS TransmissionTotalCapacity,
     b.BayName,
-    gp.Technology,
+    t.TechnologyName AS Technology,
+    t.TechnologyGroup AS TechnologyGroup,
     gp.PowerCapacity,
     gp.TotalCapacity AS GenerationTotalCapacity,
     NULL AS StorageCapacity,
@@ -90,6 +92,8 @@ INNER JOIN GenerationProject gp
     ON p.ProjectID = gp.ProjectID
 LEFT JOIN Bay b
     ON gp.BayID = b.BayID
+LEFT JOIN Technology t
+    ON gp.TechnologyID = t.TechnologyID
 
 UNION ALL
 
@@ -99,7 +103,8 @@ SELECT
     NULL AS VoltageLevel,
     NULL AS TransmissionTotalCapacity,
     b.BayName,
-    dp.Technology,
+    t.TechnologyName AS Technology,
+    t.TechnologyGroup AS TechnologyGroup,
     dp.PowerCapacity,
     dp.TotalCapacity AS GenerationTotalCapacity,
     NULL AS StorageCapacity,
@@ -109,6 +114,8 @@ INNER JOIN DERProject dp
     ON p.ProjectID = dp.ProjectID
 LEFT JOIN Bay b
     ON dp.BayID = b.BayID
+LEFT JOIN Technology t
+    ON dp.TechnologyID = t.TechnologyID
 
 UNION ALL
 
@@ -118,7 +125,8 @@ SELECT
     NULL AS VoltageLevel,
     NULL AS TransmissionTotalCapacity,
     b.BayName,
-    bp.Technology,
+    t.TechnologyName AS Technology,
+    t.TechnologyGroup AS TechnologyGroup,
     bp.PowerCapacity,
     NULL AS GenerationTotalCapacity,
     bp.StorageCapacity,
@@ -127,9 +135,10 @@ FROM Project p
 INNER JOIN BESSProject bp
     ON p.ProjectID = bp.ProjectID
 LEFT JOIN Bay b
-    ON bp.BayID = b.BayID;
+    ON bp.BayID = b.BayID
+LEFT JOIN Technology t
+    ON bp.TechnologyID = t.TechnologyID;
 """
-
 
 PROJECT_DATES_QUERY = """
 SELECT
