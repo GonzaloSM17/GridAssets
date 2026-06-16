@@ -232,7 +232,13 @@ class DatabasePopulator:
 
     def _populate_lookups(self, session) -> None:
         """Populate initial lookup tables."""
-        for state in ("NonStarted", "UnderConstruction", "OnHold", "InService"):
+        for state in (
+            "InService",
+            "NonStarted",
+            "UnderConstruction",
+            "OnHold",
+            "Cancelled",
+        ):
             self._ensure_lookup(session, ProjectState, state)
 
         for document_type in (
