@@ -4,16 +4,12 @@ from datetime import date, datetime, time
 from typing import Any
 
 import pandas as pd
-from sqlalchemy import func, text
+from sqlalchemy import text
 from sqlalchemy.orm import sessionmaker
 
 from database.db_connection import get_sqlserver_engine
-from database.db_orm_model import (
-    ElectricalModel,
-    Project,
-    ProjectElectricalModel,
-    Software,
-)
+from database.db_orm_model import ElectricalModel, Project, ProjectElectricalModel, Software
+
 
 DEFAULT_SOFTWARE_NAMES = [
     "DIgSILENT PowerFactory",
@@ -23,33 +19,29 @@ DEFAULT_SOFTWARE_NAMES = [
 ]
 
 
+VALID_INCLUSION_MODES = {"operation", "operation_projected"}
+
+
 def _get_session():
     """Create a new SQLAlchemy session using the project SQL Server engine."""
+
     engine = get_sqlserver_engine()
     Session = sessionmaker(bind=engine)
     return Session()
 
 
-def _normalize_name(value: str | None) -> str:
-    """Normalize catalog names for case-insensitive comparisons."""
-    return str(value or "").strip().casefold()
-
-
 def _normalize_cutoff_datetime(cod_cutoff_date: date | datetime) -> datetime:
     """Convert a date picker value into an inclusive end-of-day datetime."""
+
     if isinstance(cod_cutoff_date, datetime):
         return cod_cutoff_date
+
     return datetime.combine(cod_cutoff_date, time.max)
 
 
 def ensure_default_software() -> None:
-    """Create default software records if they do not exist yet.
+    """Create default software records if they do not exist yet."""
 
-    SQL Server unique constraints are usually case-insensitive. This method must
-    therefore compare names case-insensitively too. Otherwise, an existing row
-    such as "PSS/e" can incorrectly look different from the canonical "PSS/E"
-    in Python and trigger a duplicate-key error.
-    """
     session = _get_session()
     try:
         _ensure_default_software(session)
@@ -62,51 +54,40 @@ def ensure_default_software() -> None:
 
 
 def _ensure_default_software(session) -> None:
-    """Create missing default software records inside an open session.
+    """Internal helper to create default software records inside an open session."""
 
-    Existing rows are matched by normalized name, not by exact Python string, so
-    the seed is idempotent with SQL Server case-insensitive collations.
-    """
-    existing_rows = session.query(Software).all()
-    software_by_normalized_name = {
-        _normalize_name(row.SoftwareName): row for row in existing_rows
+    existing_names = {
+        row.SoftwareName
+        for row in session.query(Software).all()
     }
 
-    for canonical_name in DEFAULT_SOFTWARE_NAMES:
-        normalized_name = _normalize_name(canonical_name)
-        existing = software_by_normalized_name.get(normalized_name)
-
-        if existing:
-            # Keep one canonical spelling in the catalog. This also fixes rows
-            # previously created as variants such as "PSS/e".
-            if existing.SoftwareName != canonical_name:
-                existing.SoftwareName = canonical_name
-            if not bool(existing.IsActive):
-                existing.IsActive = True
-            continue
-
-        new_software = Software(
-            SoftwareName=canonical_name,
-            IsActive=True,
-        )
-        session.add(new_software)
-        software_by_normalized_name[normalized_name] = new_software
+    for software_name in DEFAULT_SOFTWARE_NAMES:
+        if software_name not in existing_names:
+            session.add(
+                Software(
+                    SoftwareName=software_name,
+                    IsActive=True,
+                )
+            )
 
     session.flush()
 
 
 def list_software(include_inactive: bool = False) -> pd.DataFrame:
     """Return the software catalog."""
+
     session = _get_session()
     try:
         _ensure_default_software(session)
         session.commit()
 
         query = session.query(Software)
+
         if not include_inactive:
             query = query.filter(Software.IsActive == 1)
 
         rows = query.order_by(Software.SoftwareName).all()
+
         return pd.DataFrame(
             [
                 {
@@ -126,22 +107,26 @@ def list_software(include_inactive: bool = False) -> pd.DataFrame:
 
 def list_models(include_inactive: bool = False) -> pd.DataFrame:
     """Return electrical models with their software."""
+
     session = _get_session()
     try:
         _ensure_default_software(session)
         session.commit()
 
-        query = session.query(ElectricalModel, Software).join(
-            Software,
-            ElectricalModel.SoftwareID == Software.SoftwareID,
+        query = (
+            session.query(ElectricalModel, Software)
+            .join(Software, ElectricalModel.SoftwareID == Software.SoftwareID)
         )
+
         if not include_inactive:
             query = query.filter(ElectricalModel.IsActive == 1)
 
-        rows = query.order_by(
-            Software.SoftwareName,
-            ElectricalModel.ElectricalModelName,
-        ).all()
+        rows = (
+            query
+            .order_by(Software.SoftwareName, ElectricalModel.ElectricalModelName)
+            .all()
+        )
+
         return pd.DataFrame(
             [
                 {
@@ -149,8 +134,6 @@ def list_models(include_inactive: bool = False) -> pd.DataFrame:
                     "ElectricalModelName": model.ElectricalModelName,
                     "SoftwareID": software.SoftwareID,
                     "SoftwareName": software.SoftwareName,
-                    "SoftwareVersion": model.SoftwareVersion,
-                    "Description": model.Description,
                     "IsActive": bool(model.IsActive),
                 }
                 for model, software in rows
@@ -165,7 +148,9 @@ def list_models(include_inactive: bool = False) -> pd.DataFrame:
 
 def create_model(electrical_model_name: str, software_id: int) -> None:
     """Create or reactivate an electrical model for a software."""
+
     cleaned_name = str(electrical_model_name or "").strip()
+
     if not cleaned_name:
         raise ValueError("El nombre del modelo eléctrico no puede estar vacío.")
 
@@ -181,14 +166,12 @@ def create_model(electrical_model_name: str, software_id: int) -> None:
             session.query(ElectricalModel)
             .filter(
                 ElectricalModel.SoftwareID == int(software_id),
-                func.lower(ElectricalModel.ElectricalModelName)
-                == cleaned_name.lower(),
+                ElectricalModel.ElectricalModelName == cleaned_name,
             )
             .one_or_none()
         )
 
         if existing:
-            existing.ElectricalModelName = cleaned_name
             existing.IsActive = True
         else:
             session.add(
@@ -209,9 +192,11 @@ def create_model(electrical_model_name: str, software_id: int) -> None:
 
 def deactivate_model(electrical_model_id: int) -> None:
     """Soft-delete an electrical model."""
+
     session = _get_session()
     try:
         model = session.get(ElectricalModel, int(electrical_model_id))
+
         if not model:
             raise ValueError(
                 f"No existe el modelo eléctrico con ID {electrical_model_id}."
@@ -227,7 +212,8 @@ def deactivate_model(electrical_model_id: int) -> None:
 
 
 def get_project_modeling_status(project_id: int) -> pd.DataFrame:
-    """Return all active electrical models and project True/False status."""
+    """Return all active electrical models and the project True/False status."""
+
     session = _get_session()
     try:
         project = session.get(Project, int(project_id))
@@ -241,13 +227,16 @@ def get_project_modeling_status(project_id: int) -> pd.DataFrame:
             .order_by(Software.SoftwareName, ElectricalModel.ElectricalModelName)
             .all()
         )
+
         links = (
             session.query(ProjectElectricalModel)
             .filter(ProjectElectricalModel.ProjectID == int(project_id))
             .all()
         )
+
         modeled_by_model_id = {
-            int(link.ElectricalModelID): bool(link.IsModeled) for link in links
+            int(link.ElectricalModelID): bool(link.IsModeled)
+            for link in links
         }
 
         return pd.DataFrame(
@@ -274,6 +263,7 @@ def update_project_modeling_status(
     is_modeled: bool,
 ) -> None:
     """Insert or update the modeling status for a project/model pair."""
+
     session = _get_session()
     try:
         project = session.get(Project, int(project_id))
@@ -290,8 +280,7 @@ def update_project_modeling_status(
             session.query(ProjectElectricalModel)
             .filter(
                 ProjectElectricalModel.ProjectID == int(project_id),
-                ProjectElectricalModel.ElectricalModelID
-                == int(electrical_model_id),
+                ProjectElectricalModel.ElectricalModelID == int(electrical_model_id),
             )
             .one_or_none()
         )
@@ -320,25 +309,43 @@ def preview_projects_for_bulk_modeling_by_cod(
     cod_cutoff_date: date | datetime,
     project_type: str | None = None,
     only_unmodeled: bool = True,
+    inclusion_mode: str = "operation",
 ) -> pd.DataFrame:
-    """Preview projects whose latest COD_Actual is less than or equal to cutoff."""
+    """Preview projects that match a bulk modeling date criterion.
+
+    inclusion_mode values:
+    - "operation": uses only COD_Actual.
+    - "operation_projected": uses COD_Actual, then COD_Estimated,
+      then Commissioning_Actual, then Commissioning_Estimated.
+    """
+
+    if inclusion_mode not in VALID_INCLUSION_MODES:
+        raise ValueError(
+            "inclusion_mode must be 'operation' or 'operation_projected'."
+        )
+
     cutoff_datetime = _normalize_cutoff_datetime(cod_cutoff_date)
-    selected_project_type = None if not project_type or project_type == "all" else project_type
+
+    selected_project_type = None
+    if project_type and project_type != "all":
+        selected_project_type = project_type
+
     only_unmodeled_int = 1 if only_unmodeled else 0
 
     query = text(
         """
-        WITH LatestCOD AS (
+        WITH RankedRelevantDates AS (
             SELECT
                 p.ProjectID,
                 p.ProjectName,
                 p.NUP,
                 p.project_discriminator,
                 pe.ProjectEntityName,
-                rd.DateValue AS COD_Actual,
+                mt.MilestoneName,
+                rd.DateValue,
                 rd.ExtractedAt,
                 ROW_NUMBER() OVER (
-                    PARTITION BY p.ProjectID
+                    PARTITION BY p.ProjectID, mt.MilestoneName
                     ORDER BY rd.ExtractedAt DESC, rd.DateValue DESC
                 ) AS RowNumber
             FROM Project p
@@ -348,35 +355,112 @@ def preview_projects_for_bulk_modeling_by_cod(
                 ON rd.MilestoneTypeID = mt.MilestoneTypeID
             LEFT JOIN ProjectEntity pe
                 ON p.ProjectEntityID = pe.ProjectEntityID
-            WHERE mt.MilestoneName = 'COD_Actual'
+            WHERE mt.MilestoneName IN (
+                'COD_Actual',
+                'COD_Estimated',
+                'Commissioning_Actual',
+                'Commissioning_Estimated'
+            )
+        ),
+        ProjectDates AS (
+            SELECT
+                ProjectID,
+                MAX(ProjectName) AS ProjectName,
+                MAX(NUP) AS NUP,
+                MAX(project_discriminator) AS project_discriminator,
+                MAX(ProjectEntityName) AS ProjectEntityName,
+                MAX(CASE
+                    WHEN MilestoneName = 'COD_Actual' AND RowNumber = 1
+                    THEN DateValue
+                END) AS COD_Actual,
+                MAX(CASE
+                    WHEN MilestoneName = 'COD_Estimated' AND RowNumber = 1
+                    THEN DateValue
+                END) AS COD_Estimated,
+                MAX(CASE
+                    WHEN MilestoneName = 'Commissioning_Actual' AND RowNumber = 1
+                    THEN DateValue
+                END) AS Commissioning_Actual,
+                MAX(CASE
+                    WHEN MilestoneName = 'Commissioning_Estimated' AND RowNumber = 1
+                    THEN DateValue
+                END) AS Commissioning_Estimated
+            FROM RankedRelevantDates
+            GROUP BY ProjectID
+        ),
+        DateSelection AS (
+            SELECT
+                ProjectID,
+                ProjectName,
+                NUP,
+                ProjectEntityName,
+                project_discriminator,
+                COD_Actual,
+                COD_Estimated,
+                Commissioning_Actual,
+                Commissioning_Estimated,
+                CASE
+                    WHEN :inclusion_mode = 'operation' THEN COD_Actual
+                    ELSE COALESCE(
+                        COD_Actual,
+                        COD_Estimated,
+                        Commissioning_Actual,
+                        Commissioning_Estimated
+                    )
+                END AS ReferenceDate,
+                CASE
+                    WHEN :inclusion_mode = 'operation'
+                        AND COD_Actual IS NOT NULL
+                        THEN 'COD_Actual'
+                    WHEN :inclusion_mode = 'operation_projected'
+                        AND COD_Actual IS NOT NULL
+                        THEN 'COD_Actual'
+                    WHEN :inclusion_mode = 'operation_projected'
+                        AND COD_Estimated IS NOT NULL
+                        THEN 'COD_Estimated'
+                    WHEN :inclusion_mode = 'operation_projected'
+                        AND Commissioning_Actual IS NOT NULL
+                        THEN 'Commissioning_Actual'
+                    WHEN :inclusion_mode = 'operation_projected'
+                        AND Commissioning_Estimated IS NOT NULL
+                        THEN 'Commissioning_Estimated'
+                    ELSE NULL
+                END AS ReferenceDateSource
+            FROM ProjectDates
         )
         SELECT
-            c.ProjectID,
-            c.ProjectName,
-            c.NUP,
-            c.ProjectEntityName,
-            c.project_discriminator,
-            c.COD_Actual,
+            ds.ProjectID,
+            ds.ProjectName,
+            ds.NUP,
+            ds.ProjectEntityName,
+            ds.project_discriminator,
+            ds.COD_Actual,
+            ds.COD_Estimated,
+            ds.Commissioning_Actual,
+            ds.Commissioning_Estimated,
+            ds.ReferenceDate,
+            ds.ReferenceDateSource,
             CAST(ISNULL(pem.IsModeled, 0) AS int) AS IsCurrentlyModeled
-        FROM LatestCOD c
+        FROM DateSelection ds
         LEFT JOIN ProjectElectricalModel pem
-            ON c.ProjectID = pem.ProjectID
+            ON ds.ProjectID = pem.ProjectID
             AND pem.ElectricalModelID = :electrical_model_id
-        WHERE c.RowNumber = 1
-            AND c.COD_Actual <= :cutoff_datetime
+        WHERE ds.ReferenceDate IS NOT NULL
+            AND ds.ReferenceDate <= :cutoff_datetime
             AND (
                 :project_type IS NULL
-                OR c.project_discriminator = :project_type
+                OR ds.project_discriminator = :project_type
             )
             AND (
                 :only_unmodeled = 0
                 OR ISNULL(pem.IsModeled, 0) = 0
             )
-        ORDER BY c.COD_Actual DESC, c.ProjectID;
+        ORDER BY ds.ReferenceDate DESC, ds.ProjectID;
         """
     )
 
     engine = get_sqlserver_engine()
+
     with engine.connect() as connection:
         df = pd.read_sql_query(
             query,
@@ -386,6 +470,7 @@ def preview_projects_for_bulk_modeling_by_cod(
                 "cutoff_datetime": cutoff_datetime,
                 "project_type": selected_project_type,
                 "only_unmodeled": only_unmodeled_int,
+                "inclusion_mode": inclusion_mode,
             },
         )
 
@@ -393,7 +478,19 @@ def preview_projects_for_bulk_modeling_by_cod(
         return df
 
     df["IsCurrentlyModeled"] = df["IsCurrentlyModeled"].astype(bool)
-    df["COD_Actual"] = pd.to_datetime(df["COD_Actual"], errors="coerce")
+
+    date_columns = [
+        "COD_Actual",
+        "COD_Estimated",
+        "Commissioning_Actual",
+        "Commissioning_Estimated",
+        "ReferenceDate",
+    ]
+
+    for column in date_columns:
+        if column in df.columns:
+            df[column] = pd.to_datetime(df[column], errors="coerce")
+
     return df
 
 
@@ -402,14 +499,18 @@ def bulk_set_modeled_by_cod_date(
     cod_cutoff_date: date | datetime,
     project_type: str | None = None,
     only_unmodeled: bool = True,
+    inclusion_mode: str = "operation",
 ) -> dict[str, Any]:
-    """Mark as modeled all projects whose latest COD_Actual is <= cutoff."""
+    """Mark projects as modeled using the selected bulk modeling criterion."""
+
     preview_df = preview_projects_for_bulk_modeling_by_cod(
         electrical_model_id=electrical_model_id,
         cod_cutoff_date=cod_cutoff_date,
         project_type=project_type,
         only_unmodeled=only_unmodeled,
+        inclusion_mode=inclusion_mode,
     )
+
     if preview_df.empty:
         return {
             "matched": 0,
@@ -435,14 +536,15 @@ def bulk_set_modeled_by_cod_date(
         existing_links = (
             session.query(ProjectElectricalModel)
             .filter(
-                ProjectElectricalModel.ElectricalModelID
-                == int(electrical_model_id),
+                ProjectElectricalModel.ElectricalModelID == int(electrical_model_id),
                 ProjectElectricalModel.ProjectID.in_(project_ids),
             )
             .all()
         )
+
         links_by_project_id = {
-            int(link.ProjectID): link for link in existing_links
+            int(link.ProjectID): link
+            for link in existing_links
         }
 
         created_count = 0
@@ -451,6 +553,7 @@ def bulk_set_modeled_by_cod_date(
 
         for project_id in project_ids:
             existing = links_by_project_id.get(project_id)
+
             if existing:
                 if bool(existing.IsModeled):
                     already_modeled_count += 1
@@ -468,6 +571,7 @@ def bulk_set_modeled_by_cod_date(
                 created_count += 1
 
         session.commit()
+
         return {
             "matched": len(project_ids),
             "updated": updated_count,
@@ -475,6 +579,7 @@ def bulk_set_modeled_by_cod_date(
             "changed": updated_count + created_count,
             "already_modeled": already_modeled_count,
         }
+
     except Exception:
         session.rollback()
         raise

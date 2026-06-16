@@ -99,9 +99,11 @@ class ProjectApp:
                     ProjectView.render_export_button(
                         df,
                         features_df if features_df is not None else pd.DataFrame(),
-                        legal_documents_df
-                        if legal_documents_df is not None
-                        else pd.DataFrame(),
+                        (
+                            legal_documents_df
+                            if legal_documents_df is not None
+                            else pd.DataFrame()
+                        ),
                         dates_df if dates_df is not None else pd.DataFrame(),
                     )
                 else:
@@ -120,7 +122,9 @@ class ProjectApp:
                 if db_ready:
                     CNEIngestionView.render_cne_panel_column()
                 else:
-                    st.info("Carga CNE disponible después de crear la base y el schema.")
+                    st.info(
+                        "Carga CNE disponible después de crear la base y el schema."
+                    )
 
         with model_col:
             if db_ready:
@@ -130,7 +134,9 @@ class ProjectApp:
                 )
             else:
                 with st.expander(" Gestión modelos eléctricos", expanded=True):
-                    st.info("Gestión de modelos disponible cuando la base esté operativa.")
+                    st.info(
+                        "Gestión de modelos disponible cuando la base esté operativa."
+                    )
 
 
 if __name__ == "__main__":
