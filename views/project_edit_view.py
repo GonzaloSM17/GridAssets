@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import pandas as pd
 import streamlit as st
 
@@ -13,16 +15,13 @@ class ProjectEditView:
         from services.project_edit_service import update_project_nup
 
         st.markdown("**NUP**")
-        st.caption(
-            f"Actual: {current_nup}" if current_nup else "Actual: Empty"
-        )
+        st.caption(f"Actual: {current_nup}" if current_nup else "Actual: Empty")
 
         msg_key = f"nup_msg_{project_id}"
         ProjectEditView._render_session_message(msg_key)
 
         with st.form(key=f"nup_form_{project_id}"):
             col_input, col_save, col_clear = st.columns([2.4, 1.1, 1.2])
-
             with col_input:
                 nup_input = st.number_input(
                     "Nuevo NUP",
@@ -31,7 +30,6 @@ class ProjectEditView:
                     step=1,
                     help="Usa 0 para dejar el NUP vacío.",
                 )
-
             with col_save:
                 st.write("")
                 submitted = st.form_submit_button(
@@ -39,7 +37,6 @@ class ProjectEditView:
                     type="primary",
                     use_container_width=True,
                 )
-
             with col_clear:
                 st.write("")
                 clear_nup = st.form_submit_button(
@@ -90,20 +87,14 @@ class ProjectEditView:
             col_milestone, col_date, col_save, col_delete = st.columns(
                 [2.2, 1.25, 1.0, 1.0]
             )
-
             with col_milestone:
-                milestone = st.selectbox(
-                    "Hito",
-                    options=milestone_options,
-                )
-
+                milestone = st.selectbox("Hito", options=milestone_options)
             with col_date:
                 date_value = st.date_input(
                     "Fecha",
                     value=None,
                     format="DD/MM/YYYY",
                 )
-
             with col_save:
                 st.write("")
                 submitted = st.form_submit_button(
@@ -111,7 +102,6 @@ class ProjectEditView:
                     type="primary",
                     use_container_width=True,
                 )
-
             with col_delete:
                 st.write("")
                 delete = st.form_submit_button(
@@ -130,7 +120,6 @@ class ProjectEditView:
                         )
                     else:
                         text = f"Fecha eliminada: {milestone}"
-
                     st.session_state[msg_key] = {
                         "type": "success",
                         "text": f"✅ {text}",
@@ -152,7 +141,7 @@ class ProjectEditView:
             update_project_status,
         )
 
-        st.markdown("**Status**")
+        st.markdown("**Estado**")
         st.caption(f"Actual: {current_status}" if current_status else "Actual: Empty")
 
         msg_key = f"status_msg_{project_id}"
@@ -161,31 +150,28 @@ class ProjectEditView:
         try:
             status_options = get_project_status_options()
         except Exception as exc:
-            st.error(f"No se pudieron cargar los status: {exc}")
+            st.error(f"No se pudieron cargar los estados: {exc}")
             return
 
-        options = ["Sin status", *status_options]
+        options = ["Sin estado", *status_options]
         current_index = options.index(current_status) if current_status in options else 0
 
         with st.form(key=f"status_form_{project_id}"):
             col_status, col_custom, col_save, col_clear = st.columns(
                 [1.6, 1.9, 1.0, 1.0]
             )
-
             with col_status:
                 selected_status = st.selectbox(
-                    "Status",
+                    "Estado",
                     options=options,
                     index=current_index,
                 )
-
             with col_custom:
                 custom_status = st.text_input(
                     "Personalizado",
                     value="",
                     placeholder="Opcional",
                 )
-
             with col_save:
                 st.write("")
                 submitted = st.form_submit_button(
@@ -193,7 +179,6 @@ class ProjectEditView:
                     type="primary",
                     use_container_width=True,
                 )
-
             with col_clear:
                 st.write("")
                 clear_status = st.form_submit_button(
@@ -206,15 +191,15 @@ class ProjectEditView:
                     new_status = None
                 else:
                     new_status = custom_status.strip() or selected_status
-                    if new_status == "Sin status":
+                    if new_status == "Sin estado":
                         new_status = None
 
                 try:
                     update_project_status(project_id, new_status)
                     text = (
-                        f"Status actualizado: {new_status}"
+                        f"Estado actualizado: {new_status}"
                         if new_status
-                        else "Status limpiado."
+                        else "Estado limpiado."
                     )
                     st.session_state[msg_key] = {
                         "type": "success",
@@ -260,7 +245,6 @@ class ProjectEditView:
     def _render_session_message(msg_key: str) -> None:
         if msg_key not in st.session_state:
             return
-
         msg = st.session_state.pop(msg_key)
         if msg["type"] == "success":
             st.success(msg["text"])

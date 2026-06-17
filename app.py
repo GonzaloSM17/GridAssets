@@ -67,7 +67,6 @@ class ProjectApp:
 
             st.divider()
             ScraperView.render_web_scraper_panel()
-
             ProjectView.render_project_tabs(
                 df=df,
                 project_types=project_types,
@@ -92,7 +91,7 @@ class ProjectApp:
         summary_col, db_col, model_col = st.columns([1, 1, 1], gap="large")
 
         with summary_col:
-            with st.expander(" Resumen", expanded=True):
+            with st.expander("Resumen", expanded=True):
                 if db_ready and df is not None:
                     ProjectView.render_summary_panel(df, project_types)
                     st.divider()
@@ -110,7 +109,7 @@ class ProjectApp:
                     st.info("Resumen disponible cuando la base esté operativa.")
 
         with db_col:
-            with st.expander(" Gestión de base de datos", expanded=True):
+            with st.expander("Gestión de base de datos", expanded=True):
                 st.caption(
                     "Verificación de conexión, creación de esquema y carga "
                     "de archivos CNE."
@@ -118,7 +117,6 @@ class ProjectApp:
                 st.divider()
                 DBStatusView.render_status_panel()
                 st.divider()
-
                 if db_ready:
                     CNEIngestionView.render_cne_panel_column()
                 else:
@@ -133,7 +131,7 @@ class ProjectApp:
                     expanded=True,
                 )
             else:
-                with st.expander(" Gestión modelos eléctricos", expanded=True):
+                with st.expander("Gestión de modelos eléctricos", expanded=True):
                     st.info(
                         "Gestión de modelos disponible cuando la base esté operativa."
                     )

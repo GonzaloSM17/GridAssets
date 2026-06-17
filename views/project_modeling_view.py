@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import streamlit as st
 
 
@@ -7,10 +9,7 @@ class ProjectModelingView:
     @staticmethod
     def render_modeling_editor(project_id: int) -> None:
         """Render editable electrical modeling status for one project."""
-        from services.electrical_model_service import (
-            get_project_modeling_status,
-            update_project_modeling_status,
-        )
+        from services.electrical_model_service import get_project_modeling_status
 
         st.markdown("**Estado de modelación eléctrica**")
         st.caption("Marca los modelos eléctricos donde este proyecto ya está representado.")
@@ -90,7 +89,6 @@ class ProjectModelingView:
                 for _, row in status_df.iterrows()
             }
             updates_count = 0
-
             for _, row in edited_df.iterrows():
                 electrical_model_id = int(row["ElectricalModelID"])
                 new_value = bool(row["IsModeled"])
@@ -121,7 +119,6 @@ class ProjectModelingView:
     def _render_session_message(msg_key: str) -> None:
         if msg_key not in st.session_state:
             return
-
         msg = st.session_state.pop(msg_key)
         if msg["type"] == "success":
             st.success(msg["text"])

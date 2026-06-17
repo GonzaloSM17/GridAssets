@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import pandas as pd
 import streamlit as st
 
@@ -59,6 +61,7 @@ class ProjectDetailView:
         selected_project_id: int,
         current_nup: int | None,
         current_status: str | None,
+        current_project_type: str | None,
         features_df: pd.DataFrame,
         dates_df: pd.DataFrame,
         legal_documents_df: pd.DataFrame,
@@ -93,7 +96,10 @@ class ProjectDetailView:
         )
 
         with detail_tabs[0]:
-            ProjectDetailView._render_features_tab(project_features)
+            ProjectDetailView._render_features_tab(
+                project_features,
+                current_project_type=current_project_type,
+            )
 
         with detail_tabs[1]:
             ProjectDetailView._render_documents_tab(project_legal_documents)
@@ -121,13 +127,21 @@ class ProjectDetailView:
             )
 
     @staticmethod
-    def _render_features_tab(project_features: pd.DataFrame) -> None:
+    def _render_features_tab(
+        project_features: pd.DataFrame,
+        current_project_type: str | None,
+    ) -> None:
         empty_message = "Empty: no hay características adicionales para mostrar."
 
         if project_features.empty:
             st.empty()
             st.info(empty_message)
             return
+
+        project_features = ProjectTableUtils.select_project_type_feature_columns(
+            project_features,
+            project_type=current_project_type,
+        )
 
         ProjectTableUtils.render_vertical_record(
             project_features,

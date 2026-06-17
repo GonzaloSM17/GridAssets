@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import pandas as pd
 import streamlit as st
 
@@ -23,18 +25,16 @@ class ProjectView:
     def render_header() -> None:
         st.markdown(
             f"""
-            <div class="main-header">
-                <h1>{AppConfig.APP_TITLE}</h1>
-                <p>{AppConfig.APP_SUBTITLE}</p>
-            </div>
-            """,
+# {AppConfig.APP_TITLE}
+
+{AppConfig.APP_SUBTITLE}
+""",
             unsafe_allow_html=True,
         )
 
     @staticmethod
     def render_summary(df: pd.DataFrame, project_types: list[str]) -> None:
         metric_columns = st.columns(len(project_types) + 1)
-
         with metric_columns[0]:
             st.metric("Total", len(df))
 
@@ -70,22 +70,70 @@ class ProjectView:
         legal_documents_df: pd.DataFrame,
         dates_df: pd.DataFrame,
     ) -> None:
-        """Render a download button that exports all project data to Excel."""
-        from services.excel_export_service import build_projects_excel, suggested_filename
+        """Render the Excel export controls."""
+        from services.excel_export_service import (
+            build_projects_excel,
+            list_electrical_models_for_export,
+            suggested_filename,
+        )
+
+        st.markdown("#### Exportar")
+        st.caption(
+            "Exporta una planilla Excel con una vista macro del portafolio, una vista general de proyectos, hojas separadas por tipo, fechas y documentos."
+        )
+
+        models_df = list_electrical_models_for_export()
+        selected_electrical_model_id = None
+
+        include_electrical_modeling = st.checkbox(
+            "Incluir modelo eléctrico",
+            value=False,
+            key="export_include_electrical_modeling",
+            help=(
+                "Permite seleccionar un modelo eléctrico y agrega una columna True/False "
+                "indicando si cada proyecto está o estará considerado en la modelación."
+            ),
+        )
+
+        if include_electrical_modeling:
+            if models_df.empty:
+                st.info("No hay modelos eléctricos activos disponibles para exportar.")
+            else:
+                export_models = models_df.copy()
+                export_models["OptionLabel"] = (
+                    export_models["SoftwareName"].astype(str)
+                    + " - "
+                    + export_models["ElectricalModelName"].astype(str)
+                )
+                model_options = {
+                    row["OptionLabel"]: int(row["ElectricalModelID"])
+                    for _, row in export_models.iterrows()
+                }
+                selected_label = st.selectbox(
+                    "Modelo eléctrico",
+                    options=list(model_options.keys()),
+                    key="export_selected_electrical_model",
+                )
+                selected_electrical_model_id = model_options.get(selected_label)
 
         data = build_projects_excel(
-            overview_df,
-            features_df,
-            legal_documents_df,
-            dates_df,
+            overview_df=overview_df,
+            features_df=features_df,
+            documents_df=legal_documents_df,
+            dates_df=dates_df,
+            include_electrical_modeling=include_electrical_modeling,
+            electrical_model_id=selected_electrical_model_id,
         )
         st.download_button(
-            label=" Exportar Excel",
+            label="Exportar Excel",
             data=data,
             file_name=suggested_filename(),
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             use_container_width=True,
-            help="Una hoja por tipo de proyecto con todos los datos.",
+            help=(
+                "Incluye Summary, Overview_All, hojas por tipo, Dates y Documents. "
+                "Export_Info aparece solo si se selecciona un modelo eléctrico."
+            ),
         )
 
     @staticmethod
@@ -101,7 +149,6 @@ class ProjectView:
             for project_type in project_types
         ]
         tabs = st.tabs(tab_labels)
-
         for tab, project_type in zip(tabs, project_types):
             with tab:
                 ProjectView._render_project_type_tab(
@@ -123,19 +170,23 @@ class ProjectView:
         filtered_df = ProjectDataService.filter_by_project_type(df, project_type)
         display_df = ProjectDataService.prepare_display_dataframe(filtered_df)
 
-        st.markdown(
-            f"""
-            ### {ProjectView.get_project_type_label(project_type)}
-            {len(display_df)} proyectos registrados en esta categoría. Selecciona una fila
-            para revisar su detalle en el panel derecho.
-            """
-        )
+        st.markdown(f"""
+### {ProjectView.get_project_type_label(project_type)}
+
+{len(display_df)} proyectos registrados en esta categoría.
+Selecciona una fila para revisar su detalle en el panel derecho.
+""")
 
         if display_df.empty:
-            st.info("No projects are available for this category.")
+            st.info("No hay proyectos disponibles para esta categoría.")
             return
 
         table_df = ProjectView._apply_filters(display_df, project_type)
+        table_df = ProjectTableUtils.select_project_type_columns(
+            table_df,
+            project_type=project_type,
+            include_reference_columns=True,
+        )
         table_df = table_df.reset_index(drop=True)
 
         table_column, detail_column = st.columns([2.35, 1.15], gap="large")
@@ -156,6 +207,7 @@ class ProjectView:
             ProjectView._render_selected_project_detail(
                 table_df=table_df,
                 selected_rows=table_event.selection.rows,
+                project_type=project_type,
                 features_df=features_df,
                 dates_df=dates_df,
                 legal_documents_df=legal_documents_df,
@@ -169,7 +221,7 @@ class ProjectView:
             name_filter = st.text_input(
                 "Buscar",
                 key=f"filter_name_{project_type}",
-                placeholder=" Buscar por nombre...",
+                placeholder="Buscar por nombre...",
                 label_visibility="collapsed",
             )
 
@@ -180,10 +232,10 @@ class ProjectView:
                 else []
             )
             entity_filter = st.multiselect(
-                "Entidad",
+                "Titular",
                 options=entity_options,
                 key=f"filter_entity_{project_type}",
-                placeholder="Filtrar por entidad...",
+                placeholder="Filtrar por titular...",
                 label_visibility="collapsed",
             )
 
@@ -191,11 +243,10 @@ class ProjectView:
             no_nup_filter = st.checkbox(
                 "Sin NUP",
                 key=f"filter_no_nup_{project_type}",
-                help="Mostrar solo proyectos sin NUP asignado",
+                help="Mostrar solo proyectos sin NUP asignado.",
             )
 
         table_df = display_df.copy()
-
         if name_filter:
             table_df = table_df[
                 table_df["ProjectName"].str.contains(
@@ -204,19 +255,17 @@ class ProjectView:
                     na=False,
                 )
             ]
-
         if entity_filter:
             table_df = table_df[table_df["ProjectEntityName"].isin(entity_filter)]
-
         if no_nup_filter and "NUP" in table_df.columns:
             table_df = table_df[table_df["NUP"].isna()]
-
         return table_df
 
     @staticmethod
     def _render_selected_project_detail(
         table_df: pd.DataFrame,
         selected_rows: list[int],
+        project_type: str,
         features_df: pd.DataFrame,
         dates_df: pd.DataFrame,
         legal_documents_df: pd.DataFrame,
@@ -228,12 +277,15 @@ class ProjectView:
         selected_row_position = selected_rows[0]
         selected_project_id = int(table_df.iloc[selected_row_position]["ProjectID"])
         selected_project_name = str(table_df.iloc[selected_row_position]["ProjectName"])
+
         nup_raw = (
             table_df.iloc[selected_row_position]["NUP"]
             if "NUP" in table_df.columns
             else None
         )
-        current_nup = int(nup_raw) if nup_raw is not None and pd.notna(nup_raw) else None
+        current_nup = (
+            int(nup_raw) if nup_raw is not None and pd.notna(nup_raw) else None
+        )
 
         status_raw = (
             table_df.iloc[selected_row_position]["StatusName"]
@@ -242,9 +294,13 @@ class ProjectView:
         )
         current_status = (
             str(status_raw).strip()
-            if status_raw is not None and pd.notna(status_raw) and str(status_raw).strip()
+            if status_raw is not None
+            and pd.notna(status_raw)
+            and str(status_raw).strip()
             else None
         )
+
+        current_project_type = str(project_type or "").strip().lower() or None
 
         ProjectDetailView.render_selected_project_header(
             selected_project_id=selected_project_id,
@@ -254,14 +310,19 @@ class ProjectView:
             selected_project_id=selected_project_id,
             current_nup=current_nup,
             current_status=current_status,
+            current_project_type=current_project_type,
             features_df=features_df,
             dates_df=dates_df,
             legal_documents_df=legal_documents_df,
         )
 
     # Backward-compatible aliases for older imports/calls.
-    render_empty_detail_panel = staticmethod(ProjectDetailView.render_empty_detail_panel)
-    render_selected_project_header = staticmethod(ProjectDetailView.render_selected_project_header)
+    render_empty_detail_panel = staticmethod(
+        ProjectDetailView.render_empty_detail_panel
+    )
+    render_selected_project_header = staticmethod(
+        ProjectDetailView.render_selected_project_header
+    )
     render_project_detail = staticmethod(ProjectDetailView.render_project_detail)
     render_date_editor = staticmethod(ProjectEditView.render_date_editor)
     render_nup_editor = staticmethod(ProjectEditView.render_nup_editor)
@@ -271,5 +332,5 @@ class ProjectView:
 
     @staticmethod
     def render_error(error: Exception) -> None:
-        st.error("An error occurred while loading project data.")
+        st.error("Ocurrió un error al cargar la información de proyectos.")
         st.exception(error)

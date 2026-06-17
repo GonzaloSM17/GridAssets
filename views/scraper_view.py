@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import threading
 
 import pandas as pd
@@ -9,28 +11,23 @@ from views.project_view import ProjectView
 
 
 class ScraperView:
+    """Web scraper UI for PGP and SEO enrichment."""
+
     @staticmethod
     def render_web_scraper_panel() -> None:
         st.markdown(
             """
-            <div class="section-card section-card-orange">
-                <div class="section-title">Actualización desde fuentes web</div>
-                <div class="section-caption">
-                    Ejecuta enriquecimiento desde PGP y Seguimiento Ejecución de Obras.
-                    El avance muestra qué procesador está trabajando cada proyecto.
-                </div>
-            </div>
-            """,
+### Actualización desde fuentes web
+
+Ejecuta enriquecimiento desde PGP y Seguimiento Ejecución de Obras. El avance muestra qué procesador está trabajando cada proyecto.
+""",
             unsafe_allow_html=True,
         )
 
         with st.expander("Ejecutar scraper PGP / SEO", expanded=False):
-            (
-                validation_column,
-                source_column,
-                limit_column,
-                workers_column,
-            ) = st.columns([1.0, 1.0, 0.85, 0.85])
+            validation_column, source_column, limit_column, workers_column = st.columns(
+                [1.0, 1.0, 0.85, 0.85]
+            )
 
             with validation_column:
                 validate_now = st.button(
@@ -70,32 +67,30 @@ class ScraperView:
                     step=1,
                     key="scraper_workers",
                     help=(
-                        "Number of simultaneous processors. PGP uses up to 4; "
-                        "SEO should usually use 1 to 3 for stability."
+                        "Número de procesadores simultáneos. PGP usa hasta 4; "
+                        "SEO normalmente conviene entre 1 y 3 por estabilidad."
                     ),
                 )
 
             selected_project_types = ScraperView.render_project_type_selector(source)
 
             mode_column, pause_column = st.columns([1.0, 1.0])
-
             with mode_column:
                 update_existing = st.checkbox(
                     "Actualizar registros existentes",
                     value=False,
                     key="scraper_update_existing",
                     help=(
-                        "If disabled, the scraper only processes projects with "
-                        "missing target data."
+                        "Si está desactivado, el scraper procesa solo proyectos "
+                        "con datos objetivo faltantes."
                     ),
                 )
-
             with pause_column:
                 sleep_between_requests = st.checkbox(
                     "Pausar entre solicitudes",
                     value=True,
                     key="scraper_sleep_between_requests",
-                    help="Reduces the risk of saturating the queried websites.",
+                    help="Reduce el riesgo de saturar los sitios consultados.",
                 )
 
             if validate_now:
@@ -107,7 +102,6 @@ class ScraperView:
                 use_container_width=True,
                 key="run_web_scraper_button",
             )
-
             if run_button:
                 ScraperView.run_scraper(
                     source=source,
@@ -125,13 +119,11 @@ class ScraperView:
             "generation": "Generación",
             "bess": "Almacenamiento / BESS",
         }
-
         if source == "seo":
             st.info("SEO solo se ejecuta sobre proyectos de transmisión.")
             return ["transmission"]
 
         available_options = ["transmission", "generation", "bess"]
-
         selected_project_types = st.multiselect(
             "Tipos de proyecto para PGP",
             options=available_options,
@@ -143,9 +135,9 @@ class ScraperView:
 
         if source == "all":
             st.caption(
-                "PGP usará los tipos seleccionados. SEO se ejecutará solo sobre transmisión."
+                "PGP usará los tipos seleccionados. "
+                "SEO se ejecutará solo sobre transmisión."
             )
-
             if "transmission" not in selected_project_types:
                 st.warning(
                     "Seleccionaste PGP + SEO, pero no marcaste transmisión. "
@@ -165,18 +157,15 @@ class ScraperView:
             missing_milestones = validation.get("missing_milestones", [])
 
             if missing_sources or missing_milestones:
-                st.error("Missing base data to run the scraper.")
-
+                st.error("Faltan datos base para ejecutar el scraper.")
                 if missing_sources:
-                    st.write("Missing sources:", missing_sources)
-
+                    st.write("Fuentes faltantes:", missing_sources)
                 if missing_milestones:
-                    st.write("Missing milestones:", missing_milestones)
+                    st.write("Hitos faltantes:", missing_milestones)
             else:
-                st.success("Base data is valid. The scraper can run.")
-
+                st.success("Datos base válidos. El scraper puede ejecutarse.")
         except Exception as error:
-            st.error("Could not validate scraper base data.")
+            st.error("No se pudieron validar los datos base del scraper.")
             st.exception(error)
 
     @staticmethod
@@ -189,14 +178,13 @@ class ScraperView:
         workers: int,
     ) -> None:
         if source in ["pgp", "all"] and not project_types:
-            st.error("Select at least one project type for PGP.")
+            st.error("Selecciona al menos un tipo de proyecto para PGP.")
             return
 
         progress_bar = st.progress(0)
         status_placeholder = st.empty()
         processor_placeholder = st.empty()
         result_placeholder = st.empty()
-
         processor_events = {}
         progress_lock = threading.Lock()
 
@@ -214,48 +202,37 @@ class ScraperView:
             search_term = event.get("search_term") or ""
 
             with progress_lock:
-                # "all" is a broadcast-only event (workers > 1 initial emit).
-                # Do NOT add it to processor_events to avoid mixed str/int types
-                # in the "Processor" column, which would cause TypeError on sort_values.
                 is_individual = processor_id != "all"
-
                 if is_individual:
                     processor_key = str(processor_id)
                     processor_events[processor_key] = {
-                        "Processor": processor_key,
-                        "Source": source_name,
-                        "Progress": f"{index}/{total}",
-                        "Status": status,
+                        "Procesador": processor_key,
+                        "Fuente": source_name,
+                        "Avance": f"{index}/{total}",
+                        "Estado": status,
                         "ProjectID": project_id,
-                        "Type": project_type,
-                        "ProjectName": project_name,
-                        "SearchMode": search_mode,
-                        "SearchTerm": search_term,
-                        "Message": message,
+                        "Tipo": project_type,
+                        "Proyecto": project_name,
+                        "ModoBusqueda": search_mode,
+                        "TerminoBusqueda": search_term,
+                        "Mensaje": message,
                     }
 
-                # Streamlit widget updates are best-effort from background threads.
-                # Wrap in try/except to prevent thread-safety errors from propagating.
                 try:
                     if total > 0:
                         progress_bar.progress(min(index / total, 1.0))
 
-                    # Build a descriptive status line with all available context
-                    parts = [f"[{source_name}] Processor {processor_id}"]
-
+                    parts = [f"[{source_name}] Procesador {processor_id}"]
                     if total > 0:
                         parts.append(f"{index}/{total}")
-
                     if project_name:
                         type_label = f" [{project_type}]" if project_type else ""
                         parts.append(f"{project_name}{type_label}")
-
                     if search_mode or search_term:
                         search_info = search_mode
                         if search_term:
                             search_info += f': "{search_term}"'
-                        parts.append(f"via {search_info}")
-
+                        parts.append(f"búsqueda {search_info}")
                     if message:
                         parts.append(f"→ {message}")
 
@@ -264,8 +241,7 @@ class ScraperView:
                     if processor_events:
                         processor_df = pd.DataFrame(
                             list(processor_events.values())
-                        ).sort_values("Processor")
-
+                        ).sort_values("Procesador")
                         processor_placeholder.dataframe(
                             processor_df,
                             width="stretch",
@@ -273,10 +249,10 @@ class ScraperView:
                             column_config=ProjectView.build_column_config(processor_df),
                         )
                 except Exception:
-                    pass  # Streamlit UI updates from background threads are ignored
+                    pass
 
         try:
-            with st.spinner("Running web update..."):
+            with st.spinner("Ejecutando actualización web..."):
                 result = run_web_scraping(
                     source=source,
                     limit=limit,
@@ -288,23 +264,18 @@ class ScraperView:
                 )
 
             progress_bar.progress(1.0)
-            status_placeholder.success("Web update completed.")
-
+            status_placeholder.success("Actualización web completada.")
             ProjectDataService.clear_loaded_data()
 
             metric_total, metric_success, metric_failed = st.columns(3)
-
             with metric_total:
                 st.metric("Procesados", result.get("total", 0))
-
             with metric_success:
                 st.metric("Actualizados", result.get("success", 0))
-
             with metric_failed:
                 st.metric("Sin actualización / error", result.get("failed", 0))
 
             items = result.get("items", [])
-
             if items:
                 result_df = pd.DataFrame(items)
                 result_placeholder.dataframe(
@@ -315,16 +286,14 @@ class ScraperView:
                 )
 
             st.info(
-                "The database was updated. If the main table does not change "
-                "immediately, reload the Streamlit page."
+                "La base de datos fue actualizada. Si la tabla principal no cambia "
+                "de inmediato, recarga la página de Streamlit."
             )
-
         except TypeError as error:
             progress_bar.empty()
-            status_placeholder.error("The scraper failed with a type error.")
+            status_placeholder.error("El scraper falló por un error de tipo.")
             st.exception(error)
-
         except Exception as error:
             progress_bar.empty()
-            status_placeholder.error("The scraper could not finish correctly.")
+            status_placeholder.error("El scraper no pudo finalizar correctamente.")
             st.exception(error)

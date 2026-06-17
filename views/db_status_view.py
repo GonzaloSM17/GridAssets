@@ -11,7 +11,6 @@ from database.db_connection import get_connection_string, get_sqlserver_engine
 from database.db_create_sqlserver import SQLServerSchemaCreator
 from database.db_orm_model import Base
 
-
 EXPECTED_TABLES: list[str] = sorted({table.name for table in Base.metadata.sorted_tables})
 
 
@@ -52,7 +51,6 @@ class DBStatusView:
     def _check() -> dict:
         """Return the current server, database and ORM schema state."""
         db_name = os.getenv("SQL_DATABASE", "")
-
         try:
             master_engine = create_engine(_master_connection_string(), echo=False)
             with master_engine.connect() as conn:
@@ -95,7 +93,6 @@ class DBStatusView:
         expected = set(EXPECTED_TABLES)
         missing = sorted(expected - existing)
         present = sorted(expected & existing)
-
         return {
             "state": "ready" if not missing else "schema_missing",
             "tables_present": present,
@@ -111,7 +108,6 @@ class DBStatusView:
             with st.spinner("Creando schema en SQL Server..."):
                 creator = SQLServerSchemaCreator(get_connection_string())
                 creator.create_schema()
-
             st.success("✅ Schema creado correctamente.")
             st.session_state.pop("db_status", None)
             st.rerun()
@@ -133,7 +129,6 @@ class DBStatusView:
                 )
                 with master_engine.connect() as conn:
                     conn.execute(text(f"CREATE DATABASE {quoted_db_name}"))
-
             st.success(f"✅ Base de datos '{db_name}' creada.")
         except Exception as exc:
             if "already exists" in str(exc).lower():
@@ -154,9 +149,8 @@ class DBStatusView:
     def render_status_panel() -> None:
         """Render the database status panel."""
         st.markdown("**Base de datos**")
-
         verify = st.button(
-            " Verificar",
+            "Verificar",
             use_container_width=True,
             key="db_verify_button",
             help="Comprueba la conexión a SQL Server y verifica las tablas ORM.",
@@ -170,16 +164,16 @@ class DBStatusView:
         db_name = status.get("db_name", "")
 
         if state == "server_unreachable":
-            st.error(" Sin conexión")
+            st.error("Sin conexión")
             with st.expander("Ver error"):
                 st.caption(status.get("error"))
             return
 
         if state == "db_missing":
-            st.warning(" BD no existe")
+            st.warning("BD no existe")
             st.caption(f"`{db_name}`")
             if st.button(
-                "➕ Crear BD + Schema",
+                "Crear BD + Schema",
                 type="primary",
                 use_container_width=True,
                 key="db_create_full_button",
@@ -190,12 +184,12 @@ class DBStatusView:
 
         if state == "schema_missing":
             missing_tables = status.get("tables_missing", [])
-            st.warning(f" {len(missing_tables)} tablas faltantes")
+            st.warning(f"{len(missing_tables)} tablas faltantes")
             with st.expander("Ver tablas"):
                 for table in missing_tables:
                     st.caption(f"• {table}")
             if st.button(
-                "⚙️ Crear schema",
+                "Crear schema",
                 type="primary",
                 use_container_width=True,
                 key="db_create_schema_button",
@@ -204,5 +198,5 @@ class DBStatusView:
                 DBStatusView._create_schema()
             return
 
-        st.success(" BD operativa")
+        st.success("BD operativa")
         st.caption(f"`{db_name}` — {len(status.get('tables_present', []))} tablas")
