@@ -1,42 +1,51 @@
-"""Streamlit view for CEN connection file inspection.
+"""Streamlit view for CEN Conexiones enrichment.
 
-This view is intentionally read-only for the database. It only uploads,
-normalizes, summarizes and previews CEN connection files.
+This view handles CEN connection files as a complementary source for the
+existing database. It normalizes uploaded files, optionally builds a match
+preview against the database, and can apply safe enrichment rows only.
 """
 
 from __future__ import annotations
 
 from pathlib import Path
 import tempfile
-from typing import Optional
 
 import pandas as pd
 import streamlit as st
 
-from parsers.cen_connection_files_parse import CENConnectionFileParser, ConnectionParseResult
+from parsers.cen_connection_files_parse import (
+    CENConnectionFileParser,
+    ConnectionParseResult,
+)
+from services.cen_connection_enrichment_service import CENConnectionEnrichmentService
 
 
 class CENConnectionView:
-    """UI for CEN connection enrichment file inspection."""
+    """UI for CEN Conexiones complementary enrichment."""
 
     UPLOAD_HELP = (
-        "Estos archivos pertenecen a CEN Conexiones y se usarán como fuente "
-        "secundaria para enriquecer proyectos existentes. No crean proyectos nuevos."
+        "Archivos CEN Conexiones usados para complementar proyectos existentes. "
+        "No crean proyectos nuevos."
     )
 
     @staticmethod
+    def render_expander(expanded: bool = False) -> None:
+        with st.expander("Complementar base de datos", expanded=expanded):
+            CENConnectionView.render()
+
+    @staticmethod
     def render() -> None:
-        st.markdown("### CEN Conexiones — Enriquecimiento de BD")
+        st.markdown("### Complementar base de datos")
         st.caption(
-            "Inspección inicial de archivos de conexión. "
-            "Esta fase no actualiza la base de datos."
+            "Carga archivos CEN Conexiones para enriquecer proyectos existentes "
+            "con NUP y fechas PES/EO normalizadas."
+        )
+        st.caption(
+            "Módulo CEN Conexiones: inspección, preview de cruce y enriquecimiento seguro."
         )
 
         tab_entry, tab_construction = st.tabs(
-            [
-                "Entrada en Operación",
-                "Declarados en Construcción",
-            ]
+            ["Entrada en Operación", "Declarados en Construcción"]
         )
 
         with tab_entry:
@@ -54,12 +63,6 @@ class CENConnectionView:
             )
 
     @staticmethod
-    def render_expander(expanded: bool = False) -> None:
-        """Convenience wrapper for integration in app.py."""
-        with st.expander("CEN Conexiones — Enriquecimiento de BD", expanded=expanded):
-            CENConnectionView.render()
-
-    @staticmethod
     def _render_uploader(label: str, profile_key: str, uploader_key: str) -> None:
         uploaded = st.file_uploader(
             label,
@@ -69,7 +72,9 @@ class CENConnectionView:
         )
 
         if uploaded is None:
-            st.info("Sube un archivo para inspeccionar su estructura y fechas normalizadas.")
+            st.info(
+                "Sube un archivo para inspeccionar su estructura y fechas normalizadas."
+            )
             return
 
         tmp_path = CENConnectionView._save_uploaded_file(uploaded)
@@ -94,16 +99,16 @@ class CENConnectionView:
 
         summary = result.summary_dict()
         col1, col2, col3, col4 = st.columns(4)
-        col1.metric("Filas normalizadas", summary["total_rows"])
-        col2.metric("Filas con NUP", summary["rows_with_nup"])
-        col3.metric("Filas con fechas", summary["rows_with_any_date"])
-        col4.metric("Advertencias", summary["warnings"])
+        col1.metric("Filas normalizadas", summary.get("total_rows", 0))
+        col2.metric("Filas con NUP", summary.get("rows_with_nup", 0))
+        col3.metric("Filas con fechas", summary.get("rows_with_any_date", 0))
+        col4.metric("Advertencias", summary.get("warnings", 0))
 
         with st.expander("Resumen por hoja", expanded=True):
             if result.sheet_summaries.empty:
                 st.warning("No hay resumen de hojas disponible.")
             else:
-                st.dataframe(result.sheet_summaries, use_container_width=True, hide_index=True)
+                st.dataframe(result.sheet_summaries, width="stretch", hide_index=True)
 
         if result.warnings:
             with st.expander("Advertencias", expanded=False):
@@ -118,6 +123,9 @@ class CENConnectionView:
         CENConnectionView._render_date_coverage(records)
         CENConnectionView._render_type_coverage(records)
         CENConnectionView._render_preview(records)
+
+        # Put the database match preview before the CSV download so it is visible immediately.
+        CENConnectionView._render_match_preview_and_apply(records, result.profile_key)
         CENConnectionView._render_download(records, result.profile_key)
 
     @staticmethod
@@ -136,16 +144,19 @@ class CENConnectionView:
             }
         )
         coverage["total_rows"] = len(records)
-        coverage["coverage_pct"] = (coverage["non_empty_rows"] / coverage["total_rows"] * 100).round(1)
+        coverage["coverage_pct"] = (
+            coverage["non_empty_rows"] / coverage["total_rows"] * 100
+        ).round(1)
 
         with st.expander("Cobertura de fechas", expanded=True):
-            st.dataframe(coverage, use_container_width=True, hide_index=True)
+            st.dataframe(coverage, width="stretch", hide_index=True)
 
     @staticmethod
     def _render_type_coverage(records: pd.DataFrame) -> None:
         cols = ["source_sheet", "connection_project_type"]
         if not set(cols).issubset(records.columns):
             return
+
         coverage = (
             records.groupby(cols, dropna=False)
             .size()
@@ -153,7 +164,7 @@ class CENConnectionView:
             .sort_values(["source_sheet", "connection_project_type"])
         )
         with st.expander("Cobertura por hoja y tipo", expanded=False):
-            st.dataframe(coverage, use_container_width=True, hide_index=True)
+            st.dataframe(coverage, width="stretch", hide_index=True)
 
     @staticmethod
     def _render_preview(records: pd.DataFrame) -> None:
@@ -174,10 +185,162 @@ class CENConnectionView:
             "cod_estimated",
         ]
         cols = [col for col in preferred_cols if col in records.columns]
+
         st.markdown("#### Preview normalizado")
-        st.dataframe(records[cols].head(300), use_container_width=True, hide_index=True)
+        st.dataframe(records[cols].head(300), width="stretch", hide_index=True)
         if len(records) > 300:
             st.caption(f"Mostrando 300 de {len(records)} filas normalizadas.")
+
+    @staticmethod
+    def _render_match_preview_and_apply(
+        records: pd.DataFrame, profile_key: str
+    ) -> None:
+        st.divider()
+        st.markdown("#### Preview de cruce con BD")
+        st.caption(
+            "Intenta primero NUP + tipo compatible. Si la BD no tiene NUP, usa "
+            "nombre normalizado + tipo compatible. No crea proyectos nuevos."
+        )
+
+        should_match = st.checkbox(
+            "Cruzar archivo normalizado contra proyectos existentes",
+            value=False,
+            key=f"cen_connection_match_preview_{profile_key}",
+        )
+        if not should_match:
+            return
+
+        try:
+            service = CENConnectionEnrichmentService()
+            preview = service.build_match_preview(records)
+        except Exception as exc:
+            st.error(f"No fue posible cruzar contra la base de datos: {exc}")
+            return
+
+        if preview.empty:
+            st.warning("No se generó preview de cruce.")
+            return
+
+        CENConnectionView._render_match_summary(preview)
+        CENConnectionView._render_match_table(preview)
+        CENConnectionView._render_match_download(preview, profile_key)
+        CENConnectionView._render_apply_controls(service, preview, profile_key)
+
+    @staticmethod
+    def _render_match_summary(preview: pd.DataFrame) -> None:
+        safe_count = int(
+            preview.get("is_safe_to_apply", pd.Series(dtype=bool)).fillna(False).sum()
+        )
+        proposed_date_changes = int(
+            preview.get("date_changes_proposed", pd.Series(dtype=int)).fillna(0).sum()
+        )
+        proposed_nup_changes = int(
+            preview.get("would_update_nup", pd.Series(dtype=bool)).fillna(False).sum()
+        )
+
+        col1, col2, col3 = st.columns(3)
+        col1.metric("Filas cruzadas", len(preview))
+        col2.metric("Matches seguros", safe_count)
+        col3.metric("Cambios propuestos", proposed_date_changes + proposed_nup_changes)
+
+        if "match_status" in preview.columns:
+            status_counts = (
+                preview.groupby("match_status", dropna=False)
+                .size()
+                .reset_index(name="rows")
+                .sort_values("rows", ascending=False)
+            )
+            with st.expander("Resumen de estados de match", expanded=True):
+                st.dataframe(status_counts, width="stretch", hide_index=True)
+
+    @staticmethod
+    def _render_match_table(preview: pd.DataFrame) -> None:
+        preferred_cols = [
+            "match_status",
+            "action_proposed",
+            "is_safe_to_apply",
+            "date_changes_proposed",
+            "would_update_nup",
+            "source_sheet",
+            "row_number",
+            "connection_project_type",
+            "nup",
+            "project_name",
+            "matched_project_id",
+            "matched_project_name",
+            "matched_project_type",
+            "matched_project_nup",
+            "name_score",
+            "match_comment",
+            "commissioning_actual",
+            "commissioning_estimated",
+            "cod_actual",
+            "cod_estimated",
+        ]
+        cols = [col for col in preferred_cols if col in preview.columns]
+
+        st.markdown("##### Tabla de preview")
+        st.dataframe(preview[cols].head(500), width="stretch", hide_index=True)
+        if len(preview) > 500:
+            st.caption(f"Mostrando 500 de {len(preview)} filas de preview.")
+
+    @staticmethod
+    def _render_match_download(preview: pd.DataFrame, profile_key: str) -> None:
+        csv_data = preview.to_csv(index=False).encode("utf-8-sig")
+        st.download_button(
+            "Descargar CSV de preview de cruce",
+            data=csv_data,
+            file_name=f"cen_connection_{profile_key}_match_preview.csv",
+            mime="text/csv",
+            width="stretch",
+        )
+
+    @staticmethod
+    def _render_apply_controls(
+        service: CENConnectionEnrichmentService,
+        preview: pd.DataFrame,
+        profile_key: str,
+    ) -> None:
+        safe_count = int(
+            preview.get("is_safe_to_apply", pd.Series(dtype=bool)).fillna(False).sum()
+        )
+        if safe_count == 0:
+            st.info("No hay matches seguros para aplicar en esta carga.")
+            return
+
+        with st.expander("Aplicar enriquecimiento", expanded=False):
+            st.warning(
+                "Esta acción escribe en la BD solo para matches seguros. No crea proyectos "
+                "y omite casos ambiguos, candidatos débiles o no encontrados."
+            )
+            confirm = st.checkbox(
+                "Confirmo aplicar solo matches seguros",
+                value=False,
+                key=f"cen_connection_confirm_apply_{profile_key}",
+            )
+            if not confirm:
+                return
+
+            if st.button(
+                "Aplicar enriquecimiento seguro",
+                key=f"cen_connection_apply_{profile_key}",
+                type="primary",
+                width="stretch",
+            ):
+                try:
+                    result = service.apply_safe_enrichment(preview)
+                except Exception as exc:
+                    st.error(f"No fue posible aplicar el enriquecimiento: {exc}")
+                    return
+
+                summary = result.get("summary", {})
+                st.success("Enriquecimiento aplicado.")
+                st.json(summary)
+
+                details = result.get("details")
+                if isinstance(details, pd.DataFrame) and not details.empty:
+                    with st.expander("Detalle de aplicación", expanded=False):
+                        st.dataframe(details, width="stretch", hide_index=True)
 
     @staticmethod
     def _render_download(records: pd.DataFrame, profile_key: str) -> None:
@@ -187,5 +350,5 @@ class CENConnectionView:
             data=csv_data,
             file_name=f"cen_connection_{profile_key}_normalized.csv",
             mime="text/csv",
-            use_container_width=True,
+            width="stretch",
         )
