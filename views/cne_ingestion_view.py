@@ -59,7 +59,7 @@ class CNEIngestionView:
 
             CNEIngestionView._render_upload_state(uploaded)
 
-        CNEIngestionView._render_disabled_connection_uploads()
+        # Connection complement UI is rendered from CENConnectionView
 
     @staticmethod
     def render_cne_upload_panel() -> None:
@@ -803,33 +803,6 @@ class CNEIngestionView:
     # Disabled future uploaders
     # ------------------------------------------------------------------
 
-    @staticmethod
-    def _render_disabled_connection_uploads() -> None:
-        """Render disabled connection uploaders reserved for future use."""
-        st.caption("─── Archivos de Conexión ───")
-
-        with st.expander(
-            "📂 Conexión — Proyectos con Entrada en Operación",
-            expanded=False,
-        ):
-            st.caption("🔒 Función no habilitada")
-            st.file_uploader(
-                "Proyectos con Entrada en Operación (.xlsx)",
-                type=["xlsx", "xlsm", "xls"],
-                key="conexion_operacion_uploader",
-                label_visibility="collapsed",
-                disabled=True,
-            )
-
-        with st.expander(
-            "📂 Conexión — Proyectos Declarados en Construcción",
-            expanded=False,
-        ):
-            st.caption("🔒 Función no habilitada")
-            st.file_uploader(
-                "Proyectos Declarados en Construcción (.xlsx)",
-                type=["xlsx", "xlsm", "xls"],
-                key="conexion_construccion_uploader",
-                label_visibility="collapsed",
-                disabled=True,
-            )
+    # Connection file uploaders are intentionally not part of CNE ingestion.
+    # They are rendered from views.cen_connection_view.CENConnectionView
+    # under the 'Complementar base de datos' section.

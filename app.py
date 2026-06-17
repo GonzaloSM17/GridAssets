@@ -8,6 +8,7 @@ import streamlit as st
 from services.project_data_service import ProjectDataService
 from ui.app_config import AppConfig
 from ui.app_style import AppStyle
+from views.cen_connection_view import CENConnectionView
 from views.cne_ingestion_view import CNEIngestionView
 from views.db_status_view import DBStatusView
 from views.electrical_model_view import ElectricalModelView
@@ -98,11 +99,7 @@ class ProjectApp:
                     ProjectView.render_export_button(
                         df,
                         features_df if features_df is not None else pd.DataFrame(),
-                        (
-                            legal_documents_df
-                            if legal_documents_df is not None
-                            else pd.DataFrame()
-                        ),
+                        legal_documents_df if legal_documents_df is not None else pd.DataFrame(),
                         dates_df if dates_df is not None else pd.DataFrame(),
                     )
                 else:
@@ -111,18 +108,18 @@ class ProjectApp:
         with db_col:
             with st.expander("Gestión de base de datos", expanded=True):
                 st.caption(
-                    "Verificación de conexión, creación de esquema y carga "
-                    "de archivos CNE."
+                    "Verificación de conexión, creación de esquema, carga CNE "
+                    "y enriquecimiento con archivos CEN Conexiones."
                 )
                 st.divider()
                 DBStatusView.render_status_panel()
                 st.divider()
+
                 if db_ready:
                     CNEIngestionView.render_cne_panel_column()
+                    CENConnectionView.render_complement_database_section(expanded=False)
                 else:
-                    st.info(
-                        "Carga CNE disponible después de crear la base y el schema."
-                    )
+                    st.info("Carga CNE disponible después de crear la base y el schema.")
 
         with model_col:
             if db_ready:
@@ -132,9 +129,7 @@ class ProjectApp:
                 )
             else:
                 with st.expander("Gestión de modelos eléctricos", expanded=True):
-                    st.info(
-                        "Gestión de modelos disponible cuando la base esté operativa."
-                    )
+                    st.info("Gestión de modelos disponible cuando la base esté operativa.")
 
 
 if __name__ == "__main__":

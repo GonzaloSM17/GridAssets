@@ -20,7 +20,6 @@ from typing import Iterable
 import pandas as pd
 from sqlalchemy import text
 
-
 REFERENCE_MILESTONE_PRIORITY = [
     "COD_Actual",
     "COD_Estimated",
@@ -166,15 +165,21 @@ def build_projects_excel(
     dates_df = _ensure_dataframe(dates_df)
 
     selected_model_id = _normalize_optional_int(electrical_model_id)
-    include_selected_model = include_electrical_modeling and selected_model_id is not None
+    include_selected_model = (
+        include_electrical_modeling and selected_model_id is not None
+    )
 
     reference_df = _build_reference_dates(dates_df)
     counts_df = _build_counts(dates_df, documents_df)
     modeled_project_ids = (
-        _load_modeled_project_ids(selected_model_id) if include_selected_model else set()
+        _load_modeled_project_ids(selected_model_id)
+        if include_selected_model
+        else set()
     )
     selected_model_metadata = (
-        _load_selected_model_metadata(selected_model_id) if include_selected_model else {}
+        _load_selected_model_metadata(selected_model_id)
+        if include_selected_model
+        else {}
     )
 
     sheets: list[tuple[str, pd.DataFrame]] = [
@@ -239,8 +244,7 @@ def build_projects_excel(
 
 def list_electrical_models_for_export() -> pd.DataFrame:
     """Return active electrical models available for export selection."""
-    query = text(
-        """
+    query = text("""
         SELECT
             em.ElectricalModelID,
             s.SoftwareName,
@@ -249,8 +253,7 @@ def list_electrical_models_for_export() -> pd.DataFrame:
         INNER JOIN Software s ON em.SoftwareID = s.SoftwareID
         WHERE em.IsActive = 1
         ORDER BY s.SoftwareName, em.ElectricalModelName;
-        """
-    )
+        """)
 
     try:
         from database.db_connection import get_sqlserver_engine
@@ -264,7 +267,7 @@ def list_electrical_models_for_export() -> pd.DataFrame:
         )
 
 
-def suggested_filename(prefix: str = "gridassets_export") -> str:
+def suggested_filename(prefix: str = "GridAssets_export") -> str:
     """Return a timestamped Excel filename."""
     timestamp = pd.Timestamp.now().strftime("%Y%m%d_%H%M")
     return f"{prefix}_{timestamp}.xlsx"
@@ -578,14 +581,12 @@ def _build_counts(dates_df: pd.DataFrame, documents_df: pd.DataFrame) -> pd.Data
 
 def _load_modeled_project_ids(electrical_model_id: int) -> set[int]:
     """Return project IDs modeled in the selected electrical model."""
-    query = text(
-        """
+    query = text("""
         SELECT ProjectID
         FROM ProjectElectricalModel
         WHERE ElectricalModelID = :electrical_model_id
           AND IsModeled = 1;
-        """
-    )
+        """)
 
     try:
         from database.db_connection import get_sqlserver_engine
@@ -606,8 +607,7 @@ def _load_selected_model_metadata(electrical_model_id: int | None) -> dict[str, 
     if electrical_model_id is None:
         return {}
 
-    query = text(
-        """
+    query = text("""
         SELECT
             em.ElectricalModelID,
             s.SoftwareName,
@@ -615,18 +615,21 @@ def _load_selected_model_metadata(electrical_model_id: int | None) -> dict[str, 
         FROM ElectricalModel em
         INNER JOIN Software s ON em.SoftwareID = s.SoftwareID
         WHERE em.ElectricalModelID = :electrical_model_id;
-        """
-    )
+        """)
 
     try:
         from database.db_connection import get_sqlserver_engine
 
         engine = get_sqlserver_engine()
         with engine.connect() as connection:
-            row = connection.execute(
-                query,
-                {"electrical_model_id": int(electrical_model_id)},
-            ).mappings().first()
+            row = (
+                connection.execute(
+                    query,
+                    {"electrical_model_id": int(electrical_model_id)},
+                )
+                .mappings()
+                .first()
+            )
         return dict(row) if row else {"ElectricalModelID": electrical_model_id}
     except Exception:
         return {"ElectricalModelID": electrical_model_id}
@@ -681,7 +684,11 @@ def _merge_on_project_id(left: pd.DataFrame, right: pd.DataFrame) -> pd.DataFram
     """Merge two dataframes on ProjectID when possible."""
     if left.empty:
         return left
-    if right.empty or "ProjectID" not in left.columns or "ProjectID" not in right.columns:
+    if (
+        right.empty
+        or "ProjectID" not in left.columns
+        or "ProjectID" not in right.columns
+    ):
         return left
     return left.merge(right, on="ProjectID", how="left")
 
@@ -735,7 +742,9 @@ def _format_sheet(writer: pd.ExcelWriter, sheet_name: str, df: pd.DataFrame) -> 
                 continue
             max_length = max(max_length, len(str(value)))
 
-        worksheet.column_dimensions[column_letter].width = min(max(max_length + 2, 10), 48)
+        worksheet.column_dimensions[column_letter].width = min(
+            max(max_length + 2, 10), 48
+        )
 
     for row in worksheet.iter_rows(min_row=2):
         for cell in row:
