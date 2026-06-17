@@ -1,10 +1,4 @@
-"""Streamlit view for CEN Conexiones enrichment.
-
-This view handles CEN connection files as a complementary source for the
-existing database. It normalizes uploaded files, optionally builds a match
-preview against the database, and can apply safe enrichment rows only.
-"""
-
+"""Streamlit view for CEN Conexiones enrichment."""
 from __future__ import annotations
 
 from pathlib import Path
@@ -13,10 +7,7 @@ import tempfile
 import pandas as pd
 import streamlit as st
 
-from parsers.cen_connection_files_parse import (
-    CENConnectionFileParser,
-    ConnectionParseResult,
-)
+from parsers.cen_connection_files_parse import CENConnectionFileParser, ConnectionParseResult
 from services.cen_connection_enrichment_service import CENConnectionEnrichmentService
 
 
@@ -72,9 +63,7 @@ class CENConnectionView:
         )
 
         if uploaded is None:
-            st.info(
-                "Sube un archivo para inspeccionar su estructura y fechas normalizadas."
-            )
+            st.info("Sube un archivo para inspeccionar su estructura y fechas normalizadas.")
             return
 
         tmp_path = CENConnectionView._save_uploaded_file(uploaded)
@@ -123,8 +112,6 @@ class CENConnectionView:
         CENConnectionView._render_date_coverage(records)
         CENConnectionView._render_type_coverage(records)
         CENConnectionView._render_preview(records)
-
-        # Put the database match preview before the CSV download so it is visible immediately.
         CENConnectionView._render_match_preview_and_apply(records, result.profile_key)
         CENConnectionView._render_download(records, result.profile_key)
 
@@ -192,9 +179,7 @@ class CENConnectionView:
             st.caption(f"Mostrando 300 de {len(records)} filas normalizadas.")
 
     @staticmethod
-    def _render_match_preview_and_apply(
-        records: pd.DataFrame, profile_key: str
-    ) -> None:
+    def _render_match_preview_and_apply(records: pd.DataFrame, profile_key: str) -> None:
         st.divider()
         st.markdown("#### Preview de cruce con BD")
         st.caption(
@@ -210,9 +195,11 @@ class CENConnectionView:
         if not should_match:
             return
 
+        st.info("Ejecutando cruce contra la base de datos...")
         try:
-            service = CENConnectionEnrichmentService()
-            preview = service.build_match_preview(records)
+            with st.spinner("Cruzando proyectos existentes..."):
+                service = CENConnectionEnrichmentService()
+                preview = service.build_match_preview(records)
         except Exception as exc:
             st.error(f"No fue posible cruzar contra la base de datos: {exc}")
             return
@@ -221,6 +208,7 @@ class CENConnectionView:
             st.warning("No se generó preview de cruce.")
             return
 
+        st.success(f"Preview de cruce generado: {len(preview)} filas.")
         CENConnectionView._render_match_summary(preview)
         CENConnectionView._render_match_table(preview)
         CENConnectionView._render_match_download(preview, profile_key)
@@ -271,6 +259,8 @@ class CENConnectionView:
             "matched_project_type",
             "matched_project_nup",
             "name_score",
+            "candidate_count",
+            "top_candidates",
             "match_comment",
             "commissioning_actual",
             "commissioning_estimated",
@@ -328,7 +318,8 @@ class CENConnectionView:
                 width="stretch",
             ):
                 try:
-                    result = service.apply_safe_enrichment(preview)
+                    with st.spinner("Aplicando enriquecimiento seguro..."):
+                        result = service.apply_safe_enrichment(preview)
                 except Exception as exc:
                     st.error(f"No fue posible aplicar el enriquecimiento: {exc}")
                     return

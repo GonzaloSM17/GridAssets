@@ -67,7 +67,11 @@ class ProjectApp:
             )
 
             st.divider()
+            CENConnectionView.render_expander(expanded=False)
+
+            st.divider()
             ScraperView.render_web_scraper_panel()
+
             ProjectView.render_project_tabs(
                 df=df,
                 project_types=project_types,
@@ -112,8 +116,8 @@ class ProjectApp:
         with db_col:
             with st.expander("Gestión de base de datos", expanded=True):
                 st.caption(
-                    "Verificación de conexión, creación de esquema, carga CNE "
-                    "y enriquecimiento con archivos CEN Conexiones."
+                    "Verificación de conexión, creación de esquema y carga CNE. "
+                    "Los archivos CEN Conexiones se trabajan en una sección separada."
                 )
                 st.divider()
                 DBStatusView.render_status_panel()
@@ -121,7 +125,6 @@ class ProjectApp:
 
                 if db_ready:
                     CNEIngestionView.render_cne_panel_column()
-                    CENConnectionView.render_expander(expanded=False)
                 else:
                     st.info(
                         "Carga CNE disponible después de crear la base y el schema."
