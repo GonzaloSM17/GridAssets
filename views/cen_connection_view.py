@@ -1055,6 +1055,8 @@ class CENConnectionView:
             ("Fechas insertadas", summary.get("dates_created", 0)),
             ("Fechas actualizadas", summary.get("dates_updated", 0)),
             ("A InService", summary.get("status_updated_to_in_service", 0)),
+            ("A UnderConstruction", summary.get("status_updated_to_under_construction", 0)),
+            ("A Planned", summary.get("status_updated_to_planned", 0)),
             ("A Cancelled", summary.get("status_updated_to_cancelled", 0)),
             ("Filas omitidas", summary.get("rows_skipped", 0)),
         ]

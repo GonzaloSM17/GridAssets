@@ -18,7 +18,6 @@ from sqlalchemy import text
 
 
 IN_SERVICE_STATUS_NAME = "InService"
-CANCELLED_STATUS_NAME = "Cancelled"
 COD_ACTUAL_MILESTONE_NAME = "COD_Actual"
 
 
@@ -32,7 +31,6 @@ class ProjectStatusSyncResult:
     previous_status_id: Optional[int]
     new_status_id: Optional[int]
     message: str
-    blocked_by_cod_actual: bool = False
 
 
 class ProjectStatusService:
@@ -113,69 +111,6 @@ class ProjectStatusService:
     def set_in_service_when_cod_actual_exists(conn: Any, project_id: int) -> ProjectStatusSyncResult:
         """Backward-compatible alias for the current COD_Actual rule."""
         return ProjectStatusService.sync_project_status_from_dates(conn, project_id)
-
-
-    @staticmethod
-    def set_cancelled_if_no_cod_actual(conn: Any, project_id: int) -> ProjectStatusSyncResult:
-        """Set project status to Cancelled unless COD_Actual already exists.
-
-        This rule is used for CEN connection rows corresponding to withdrawn /
-        cancelled projects. It never cancels a project that already has COD_Actual,
-        because that case must be reviewed manually.
-        """
-        if project_id is None:
-            return ProjectStatusSyncResult(
-                project_id=-1,
-                cod_actual_exists=False,
-                status_changed=False,
-                previous_status_id=None,
-                new_status_id=None,
-                message="Missing project_id.",
-            )
-
-        current_status_id = ProjectStatusService._get_project_status_id(conn, project_id)
-        cod_actual_exists = ProjectStatusService._project_has_cod_actual(conn, project_id)
-        if cod_actual_exists:
-            return ProjectStatusSyncResult(
-                project_id=project_id,
-                cod_actual_exists=True,
-                status_changed=False,
-                previous_status_id=current_status_id,
-                new_status_id=current_status_id,
-                message="Project has COD_Actual. Cancelled status was not applied.",
-                blocked_by_cod_actual=True,
-            )
-
-        cancelled_status_id = ProjectStatusService._ensure_status(conn, CANCELLED_STATUS_NAME)
-        if current_status_id == cancelled_status_id:
-            return ProjectStatusSyncResult(
-                project_id=project_id,
-                cod_actual_exists=False,
-                status_changed=False,
-                previous_status_id=current_status_id,
-                new_status_id=current_status_id,
-                message="Project was already Cancelled.",
-            )
-
-        conn.execute(
-            text(
-                """
-                UPDATE Project
-                SET StatusID = :status_id
-                WHERE ProjectID = :project_id
-                """
-            ),
-            {"status_id": cancelled_status_id, "project_id": project_id},
-        )
-
-        return ProjectStatusSyncResult(
-            project_id=project_id,
-            cod_actual_exists=False,
-            status_changed=True,
-            previous_status_id=current_status_id,
-            new_status_id=cancelled_status_id,
-            message="Project status updated to Cancelled.",
-        )
 
     @staticmethod
     def _project_has_cod_actual(conn: Any, project_id: int) -> bool:

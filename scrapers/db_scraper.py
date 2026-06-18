@@ -1,9 +1,4 @@
-# Database Web Scraper Manager
-"""
-Orchestrates PGP and SEO web scraping updates against the SQL Server database.
-This module can be used from Streamlit or executed from the command line.
-"""
-
+"""Database-backed web scraping manager for GridAssets."""
 from __future__ import annotations
 
 import argparse
@@ -29,6 +24,8 @@ from database.db_orm_model import (
     TransmissionProject,
 )
 from scrapers.web_seekers import PGPSeeker, SEOSeeker
+from services.project_status_service import ProjectStatusService
+
 
 ProgressCallback = Optional[Callable[[Dict], None]]
 
@@ -44,10 +41,8 @@ class WebScraperManager:
         "COD_Actual",
         "Start_Construction",
     }
-
     PGP_PROJECT_TYPES = ["transmission", "generation", "bess"]
     SEO_PROJECT_TYPES = ["transmission"]
-
     MAX_PGP_WORKERS = 4
     MAX_SEO_WORKERS = 3
 
@@ -66,19 +61,15 @@ class WebScraperManager:
                 .filter(Source.SourceName.in_(self.REQUIRED_SOURCES))
                 .all()
             }
-
             existing_milestones = {
                 row.MilestoneName
                 for row in session.query(MilestoneType)
                 .filter(MilestoneType.MilestoneName.in_(self.REQUIRED_MILESTONES))
                 .all()
             }
-
             return {
                 "missing_sources": sorted(self.REQUIRED_SOURCES - existing_sources),
-                "missing_milestones": sorted(
-                    self.REQUIRED_MILESTONES - existing_milestones
-                ),
+                "missing_milestones": sorted(self.REQUIRED_MILESTONES - existing_milestones),
             }
         finally:
             session.close()
@@ -88,20 +79,14 @@ class WebScraperManager:
         validation = self.validate_reference_data()
         missing_sources = validation["missing_sources"]
         missing_milestones = validation["missing_milestones"]
-
         if missing_sources or missing_milestones:
             message_parts = []
-
             if missing_sources:
-                message_parts.append(
-                    f"missing Source rows: {', '.join(missing_sources)}"
-                )
-
+                message_parts.append(f"missing Source rows: {', '.join(missing_sources)}")
             if missing_milestones:
                 message_parts.append(
                     f"missing MilestoneType rows: {', '.join(missing_milestones)}"
                 )
-
             raise RuntimeError("Cannot run scraper because " + "; ".join(message_parts))
 
     def update_from_pgp(
@@ -115,25 +100,20 @@ class WebScraperManager:
     ) -> Dict:
         """Update selected project types from PGP."""
         self.assert_reference_data()
-
         project_types = self._normalize_project_types(
             project_types,
             allowed_types=self.PGP_PROJECT_TYPES,
             default_types=self.PGP_PROJECT_TYPES,
         )
-
         workers = self._normalize_workers(workers, self.MAX_PGP_WORKERS)
         summary = self._empty_summary("PGP", update_existing, workers)
         summary["project_types"] = project_types
-
         project_ids = self._get_pgp_project_ids(
             limit=limit,
             update_existing=update_existing,
             project_types=project_types,
         )
-
         summary["total"] = len(project_ids)
-
         if not project_ids:
             self._emit(
                 progress_callback,
@@ -143,7 +123,6 @@ class WebScraperManager:
                 project_types=project_types,
             )
             return summary
-
         return self._run_project_batch(
             source="PGP",
             project_ids=project_ids,
@@ -165,20 +144,12 @@ class WebScraperManager:
     ) -> Dict:
         """Update transmission projects from SEO."""
         self.assert_reference_data()
-
         project_types = self.SEO_PROJECT_TYPES
-
         workers = self._normalize_workers(workers, self.MAX_SEO_WORKERS)
         summary = self._empty_summary("SEO", update_existing, workers)
         summary["project_types"] = project_types
-
-        project_ids = self._get_seo_project_ids(
-            limit=limit,
-            update_existing=update_existing,
-        )
-
+        project_ids = self._get_seo_project_ids(limit=limit, update_existing=update_existing)
         summary["total"] = len(project_ids)
-
         if not project_ids:
             self._emit(
                 progress_callback,
@@ -188,7 +159,6 @@ class WebScraperManager:
                 project_types=project_types,
             )
             return summary
-
         return self._run_project_batch(
             source="SEO",
             project_ids=project_ids,
@@ -211,7 +181,6 @@ class WebScraperManager:
     ) -> Dict:
         """Run PGP, SEO or both sources and return a combined summary."""
         source = source.lower().strip()
-
         if source not in {"pgp", "seo", "all"}:
             raise ValueError("source must be one of: pgp, seo, all")
 
@@ -220,7 +189,6 @@ class WebScraperManager:
             allowed_types=self.PGP_PROJECT_TYPES,
             default_types=self.PGP_PROJECT_TYPES,
         )
-
         combined = {
             "source": source.upper(),
             "total": 0,
@@ -242,7 +210,6 @@ class WebScraperManager:
                 workers=workers,
                 project_types=pgp_project_types,
             )
-
             combined["runs"].append(pgp_summary)
             self._merge_summary(combined, pgp_summary)
 
@@ -255,7 +222,6 @@ class WebScraperManager:
                 workers=workers,
                 project_types=self.SEO_PROJECT_TYPES,
             )
-
             combined["runs"].append(seo_summary)
             self._merge_summary(combined, seo_summary)
 
@@ -268,70 +234,46 @@ class WebScraperManager:
         project_types: list[str],
     ) -> List[int]:
         session = self.Session()
-
         try:
             query = session.query(Project.ProjectID).filter(
                 Project.project_discriminator.in_(project_types)
             )
-
             if not update_existing:
                 query = query.filter(Project.NUP.is_(None))
-
             query = query.order_by(Project.ProjectID)
-
             if limit is not None:
                 query = query.limit(limit)
-
             return [row[0] for row in query.all()]
-
         finally:
             session.close()
 
-    def _get_seo_project_ids(
-        self,
-        limit: Optional[int],
-        update_existing: bool,
-    ) -> List[int]:
+    def _get_seo_project_ids(self, limit: Optional[int], update_existing: bool) -> List[int]:
         session = self.Session()
-
         try:
             query = session.query(TransmissionProject.ProjectID).filter(
                 TransmissionProject.NUP.isnot(None)
             )
-
             if not update_existing:
-                source_seo = (
-                    session.query(Source).filter(Source.SourceName == "SEO").first()
-                )
-
+                source_seo = session.query(Source).filter(Source.SourceName == "SEO").first()
                 milestone_start = (
                     session.query(MilestoneType)
                     .filter(MilestoneType.MilestoneName == "Start_Construction")
                     .first()
                 )
-
                 if source_seo and milestone_start:
                     scraped_project_ids = (
                         session.query(RelevantDate.ProjectID)
                         .filter(
-                            RelevantDate.MilestoneTypeID
-                            == milestone_start.MilestoneTypeID,
+                            RelevantDate.MilestoneTypeID == milestone_start.MilestoneTypeID,
                             RelevantDate.SourceID == source_seo.SourceID,
                         )
                         .subquery()
                     )
-
-                    query = query.filter(
-                        ~TransmissionProject.ProjectID.in_(scraped_project_ids)
-                    )
-
+                    query = query.filter(~TransmissionProject.ProjectID.in_(scraped_project_ids))
             query = query.order_by(TransmissionProject.ProjectID)
-
             if limit is not None:
                 query = query.limit(limit)
-
             return [row[0] for row in query.all()]
-
         finally:
             session.close()
 
@@ -346,13 +288,10 @@ class WebScraperManager:
         workers: int,
     ) -> Dict:
         project_briefs = self._get_project_briefs(project_ids)
-
         if workers <= 1:
             processor_id = 1
-
             for index, project_id in enumerate(project_ids, start=1):
                 project_brief = project_briefs.get(project_id, {})
-
                 self._emit(
                     progress_callback,
                     source=source,
@@ -365,22 +304,12 @@ class WebScraperManager:
                     project_type=project_brief.get("project_type", ""),
                     message=f"Processing ProjectID {project_id}",
                 )
-
                 item = processor(project_id)
                 item["processor_id"] = processor_id
-
                 self._add_item_to_summary(summary, item)
-                self._emit_item(
-                    progress_callback,
-                    item,
-                    index,
-                    len(project_ids),
-                    processor_id=processor_id,
-                )
-
+                self._emit_item(progress_callback, item, index, len(project_ids), processor_id)
                 if sleep_between_requests and index < len(project_ids):
                     time.sleep(random.uniform(2, 4))
-
             return summary
 
         self._emit(
@@ -392,15 +321,11 @@ class WebScraperManager:
             total=len(project_ids),
             message=f"Processing with {workers} simultaneous scraper processors",
         )
-
         completed = 0
-
         with ThreadPoolExecutor(max_workers=workers) as executor:
             future_to_context = {}
-
             for position, project_id in enumerate(project_ids, start=1):
                 processor_id = ((position - 1) % workers) + 1
-
                 future = executor.submit(
                     self._process_project_with_progress,
                     processor=processor,
@@ -410,30 +335,23 @@ class WebScraperManager:
                     project_brief=project_briefs.get(project_id, {}),
                     progress_callback=progress_callback,
                 )
-
                 future_to_context[future] = {
                     "project_id": project_id,
                     "processor_id": processor_id,
                 }
-
             for future in as_completed(future_to_context):
                 completed += 1
-
                 context = future_to_context[future]
                 project_id = context["project_id"]
                 processor_id = context["processor_id"]
                 project_brief = project_briefs.get(project_id, {})
-
                 try:
                     item = future.result()
                 except Exception as exc:
                     item = {
                         "source": source,
                         "project_id": project_id,
-                        "project_name": project_brief.get(
-                            "project_name",
-                            f"ProjectID {project_id}",
-                        ),
+                        "project_name": project_brief.get("project_name", f"ProjectID {project_id}"),
                         "project_type": project_brief.get("project_type", ""),
                         "processor_id": processor_id,
                         "success": False,
@@ -442,22 +360,12 @@ class WebScraperManager:
                         "search_mode": None,
                         "search_term": None,
                     }
-
                 item["processor_id"] = processor_id
-
                 self._add_item_to_summary(summary, item)
-                self._emit_item(
-                    progress_callback,
-                    item,
-                    completed,
-                    len(project_ids),
-                    processor_id=processor_id,
-                )
-
+                self._emit_item(progress_callback, item, completed, len(project_ids), processor_id)
                 if sleep_between_requests and completed < len(project_ids):
                     time.sleep(random.uniform(0.5, 1.5))
-
-        return summary
+            return summary
 
     def _process_project_with_progress(
         self,
@@ -478,46 +386,34 @@ class WebScraperManager:
             project_type=project_brief.get("project_type", ""),
             message=f"Processor {processor_id} started ProjectID {project_id}",
         )
-
         item = processor(project_id)
         item["processor_id"] = processor_id
-
         return item
 
     def _process_pgp_project(self, project_id: int) -> Dict:
         session = self.Session()
-
         try:
             project = session.get(Project, project_id)
-
             if not project:
-                return self._project_item(
-                    "PGP",
-                    project_id,
-                    None,
-                    None,
-                    False,
-                    "error",
-                    "Project not found",
-                )
+                return self._project_item("PGP", project_id, None, None, False, "error", "Project not found")
 
             project_name = project.ProjectName or f"ProjectID {project.ProjectID}"
             project_type = project.project_discriminator
-
             try:
                 seeker = PGPSeeker()
                 was_updated = seeker.seek_and_update(session, project)
-
                 if was_updated:
+                    status_result = ProjectStatusService.sync_project_status_from_dates(
+                        session, project.ProjectID
+                    )
                     session.commit()
-
                     message = "Updated from PGP"
-
                     if seeker.last_search_mode == "nup":
                         message = "Updated from PGP using NUP"
                     elif seeker.last_search_mode == "name":
                         message = "Updated from PGP using name variants"
-
+                    if status_result.status_changed:
+                        message += f" | Status -> {status_result.new_status_name}"
                     return self._project_item(
                         "PGP",
                         project.ProjectID,
@@ -529,9 +425,7 @@ class WebScraperManager:
                         search_mode=seeker.last_search_mode,
                         search_term=seeker.last_search_term,
                     )
-
                 session.rollback()
-
                 return self._project_item(
                     "PGP",
                     project.ProjectID,
@@ -543,50 +437,32 @@ class WebScraperManager:
                     search_mode=getattr(seeker, "last_search_mode", None),
                     search_term=getattr(seeker, "last_search_term", None),
                 )
-
             except Exception as exc:
                 session.rollback()
-
-                return self._project_item(
-                    "PGP",
-                    project.ProjectID,
-                    project_name,
-                    project_type,
-                    False,
-                    "error",
-                    str(exc),
-                )
-
+                return self._project_item("PGP", project.ProjectID, project_name, project_type, False, "error", str(exc))
         finally:
             session.close()
 
     def _process_seo_project(self, project_id: int) -> Dict:
         session = self.Session()
-
         try:
             project = session.get(TransmissionProject, project_id)
-
             if not project:
-                return self._project_item(
-                    "SEO",
-                    project_id,
-                    None,
-                    "transmission",
-                    False,
-                    "error",
-                    "Project not found",
-                )
+                return self._project_item("SEO", project_id, None, "transmission", False, "error", "Project not found")
 
             project_name = project.ProjectName or f"ProjectID {project.ProjectID}"
             project_type = "transmission"
-
             try:
                 seeker = SEOSeeker()
                 was_updated = seeker.seek_and_update(session, project)
-
                 if was_updated:
+                    status_result = ProjectStatusService.sync_project_status_from_dates(
+                        session, project.ProjectID
+                    )
                     session.commit()
-
+                    message = "Updated from SEO"
+                    if status_result.status_changed:
+                        message += f" | Status -> {status_result.new_status_name}"
                     return self._project_item(
                         "SEO",
                         project.ProjectID,
@@ -594,13 +470,11 @@ class WebScraperManager:
                         project_type,
                         True,
                         "success",
-                        "Updated from SEO",
+                        message,
                         search_mode="nup",
                         search_term=str(project.NUP),
                     )
-
                 session.rollback()
-
                 return self._project_item(
                     "SEO",
                     project.ProjectID,
@@ -612,40 +486,22 @@ class WebScraperManager:
                     search_mode="nup",
                     search_term=str(project.NUP),
                 )
-
             except Exception as exc:
                 session.rollback()
-
-                return self._project_item(
-                    "SEO",
-                    project.ProjectID,
-                    project_name,
-                    project_type,
-                    False,
-                    "error",
-                    str(exc),
-                )
-
+                return self._project_item("SEO", project.ProjectID, project_name, project_type, False, "error", str(exc))
         finally:
             session.close()
 
     def _get_project_briefs(self, project_ids: List[int]) -> Dict[int, Dict]:
         if not project_ids:
             return {}
-
         session = self.Session()
-
         try:
             rows = (
-                session.query(
-                    Project.ProjectID,
-                    Project.ProjectName,
-                    Project.project_discriminator,
-                )
+                session.query(Project.ProjectID, Project.ProjectName, Project.project_discriminator)
                 .filter(Project.ProjectID.in_(project_ids))
                 .all()
             )
-
             return {
                 row.ProjectID: {
                     "project_name": row.ProjectName or f"ProjectID {row.ProjectID}",
@@ -653,7 +509,6 @@ class WebScraperManager:
                 }
                 for row in rows
             }
-
         finally:
             session.close()
 
@@ -699,7 +554,6 @@ class WebScraperManager:
             summary["success"] += 1
         else:
             summary["failed"] += 1
-
         summary["items"].append(item)
 
     @staticmethod
@@ -715,7 +569,6 @@ class WebScraperManager:
             worker_count = int(workers)
         except (TypeError, ValueError):
             worker_count = 1
-
         return max(1, min(worker_count, maximum))
 
     @staticmethod
@@ -726,18 +579,13 @@ class WebScraperManager:
     ) -> list[str]:
         if not project_types:
             return default_types.copy()
-
         normalized_types = []
-
         for project_type in project_types:
             clean_type = str(project_type).lower().strip()
-
             if clean_type in allowed_types and clean_type not in normalized_types:
                 normalized_types.append(clean_type)
-
         if not normalized_types:
             return default_types.copy()
-
         return normalized_types
 
     @staticmethod
@@ -781,15 +629,12 @@ def run_web_scraping(
 ) -> Dict:
     """Run the requested scraper source and return a structured summary."""
     source = source.lower().strip()
-
     if project_types is None:
         project_types = ["transmission", "generation", "bess"]
-
     if source == "seo":
         project_types = ["transmission"]
 
     manager = WebScraperManager()
-
     return manager.update_from_sources(
         source=source,
         limit=limit,
@@ -821,18 +666,13 @@ def _cli_progress(event: Dict) -> None:
     search_term = event.get("search_term")
 
     prefix = f"[{source}]"
-
     if processor_id:
         prefix += f" Processor {processor_id}"
-
     if index is not None and total is not None:
         prefix += f" {index}/{total}"
-
     detail = message
-
     if search_mode or search_term:
         detail += f" | mode={search_mode} | term={search_term}"
-
     if project_name:
         print(
             f"{prefix} {status}: ProjectID={project_id} | "
@@ -844,34 +684,29 @@ def _cli_progress(event: Dict) -> None:
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Update projects from web sources")
-
     parser.add_argument(
         "--source",
         choices=["pgp", "seo", "all"],
         default="all",
         help="Data source to scrape",
     )
-
     parser.add_argument(
         "--limit",
         type=int,
         default=None,
         help="Maximum number of projects to process",
     )
-
     parser.add_argument(
         "--update-existing",
         action="store_true",
         help="Re-scrape projects that already have source data",
     )
-
     parser.add_argument(
         "--workers",
         type=int,
         default=1,
-        help="Number of simultaneous scraper processors. PGP max 3, SEO max 2.",
+        help="Number of simultaneous scraper processors. PGP max 4, SEO max 3.",
     )
-
     parser.add_argument(
         "--project-types",
         nargs="+",
@@ -879,13 +714,11 @@ if __name__ == "__main__":
         default=["transmission", "generation", "bess"],
         help="Project types to process with PGP. SEO always uses transmission.",
     )
-
     parser.add_argument(
         "--no-sleep",
         action="store_true",
         help="Disable pauses between requests",
     )
-
     args = parser.parse_args()
 
     print("=" * 60)
@@ -894,7 +727,6 @@ if __name__ == "__main__":
     print(f"Using database: {get_connection_string()}")
 
     manager = WebScraperManager()
-
     result = manager.update_from_sources(
         source=args.source,
         limit=args.limit,
