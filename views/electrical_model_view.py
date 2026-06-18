@@ -60,15 +60,21 @@ class ElectricalModelView:
         ElectricalModelView.render_models_table(compact=compact)
         st.divider()
         if compact:
-            ElectricalModelView.render_create_model_form()
-            st.divider()
-            ElectricalModelView.render_deactivate_model_form()
+            with st.expander("Agregar modelo", expanded=False):
+                ElectricalModelView.render_create_model_form()
+
+            with st.expander("Desactivar modelo", expanded=False):
+                ElectricalModelView.render_deactivate_model_form()
         else:
             col_create, col_deactivate = st.columns([2, 1], gap="large")
+
             with col_create:
-                ElectricalModelView.render_create_model_form()
+                with st.expander("Agregar modelo", expanded=False):
+                    ElectricalModelView.render_create_model_form()
+
             with col_deactivate:
-                ElectricalModelView.render_deactivate_model_form()
+                with st.expander("Desactivar modelo", expanded=False):
+                    ElectricalModelView.render_deactivate_model_form()
 
     @staticmethod
     def render_bulk_modeling_tab(compact: bool = False) -> None:

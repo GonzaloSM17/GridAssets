@@ -27,7 +27,9 @@ import pandas as pd
 EXCEL_EPOCH = datetime(1899, 12, 30)
 
 
-IGNORED_SHEETS = {
+IGNORED_SHEETS = set()
+
+DESISTED_SHEET_ALIASES = {
     "proy con art 157 y desistidos",
     "proyectos con art 157 y desistidos",
     "proy con art 157 desistidos",
@@ -42,6 +44,8 @@ class SheetProfile:
     source_sheet_role: str
     date_columns: Dict[str, Tuple[str, str]]
     optional_fields: Dict[str, Sequence[str]] = field(default_factory=dict)
+    record_action: str = "date_enrichment"
+    target_status: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -151,11 +155,22 @@ def _construction_sheet(project_type: str, source_sheet_role: str) -> SheetProfi
     )
 
 
+def _desisted_sheet(project_type: str, source_sheet_role: str) -> SheetProfile:
+    return SheetProfile(
+        project_type=project_type,
+        source_sheet_role=source_sheet_role,
+        date_columns={},
+        optional_fields=COMMON_OPTIONAL_FIELDS,
+        record_action="status_cancelled",
+        target_status="Cancelled",
+    )
+
+
 FILE_PROFILES: Dict[str, FileProfile] = {
     "entry_operation": FileProfile(
         key="entry_operation",
         label="Proyectos con Entrada en Operacion",
-        source_system="CEN Conexiones",
+        source_system="CEN - Conexiones",
         source_detail="Entrada en Operacion",
         sheets={
             "Tx_En Operación": _entry_sheet("transmission", "tx_entry_operation"),
@@ -165,13 +180,14 @@ FILE_PROFILES: Dict[str, FileProfile] = {
     "declared_construction": FileProfile(
         key="declared_construction",
         label="Proyectos Declarados en Construccion",
-        source_system="CEN Conexiones",
+        source_system="CEN - Conexiones",
         source_detail="Declarados en Construccion",
         sheets={
             "Tx_En Gestión": _construction_sheet("transmission", "tx_declared_construction"),
             "P. Gx En Gestión": _construction_sheet("generation_or_bess", "gx_declared_construction"),
             "Gx_BESS En Gestión": _construction_sheet("bess", "bess_declared_construction"),
             "PMGD_ En Gestión": _construction_sheet("pmgd", "pmgd_declared_construction"),
+            "Proy. con art. 157 y desistidos": _desisted_sheet("unknown", "cancelled_or_art157"),
         },
     ),
 }
@@ -185,6 +201,8 @@ CANONICAL_COLUMNS = [
     "source_sheet",
     "source_sheet_role",
     "row_number",
+    "record_action",
+    "target_status",
     "connection_project_type",
     "nup",
     "project_name",
@@ -282,8 +300,13 @@ class CENConnectionFileParser:
                 }
             )
 
-        if normalized_frames:
-            records = pd.concat(normalized_frames, ignore_index=True)
+        safe_frames = [
+            frame.reindex(columns=CANONICAL_COLUMNS).astype("object")
+            for frame in normalized_frames
+            if frame is not None and not frame.empty
+        ]
+        if safe_frames:
+            records = pd.concat(safe_frames, ignore_index=True, sort=False)
         else:
             records = pd.DataFrame(columns=CANONICAL_COLUMNS)
             warnings.append("No recognized sheets were parsed.")
@@ -378,6 +401,8 @@ class CENConnectionFileParser:
             "source_sheet": actual_sheet_name,
             "source_sheet_role": sheet_profile.source_sheet_role,
             "row_number": raw_df.index.to_series().astype(int) + header_row + 2,
+            "record_action": sheet_profile.record_action,
+            "target_status": sheet_profile.target_status,
             "connection_project_type": sheet_profile.project_type,
         }
 
