@@ -190,6 +190,99 @@ def create_model(electrical_model_name: str, software_id: int) -> None:
         session.close()
 
 
+
+def activate_model(electrical_model_id: int) -> None:
+    """Activate an existing electrical model."""
+
+    session = _get_session()
+    try:
+        model = session.get(ElectricalModel, int(electrical_model_id))
+
+        if not model:
+            raise ValueError(
+                f"No existe el modelo eléctrico con ID {electrical_model_id}."
+            )
+
+        model.IsActive = True
+        session.commit()
+    except Exception:
+        session.rollback()
+        raise
+    finally:
+        session.close()
+
+
+def get_model_usage(electrical_model_id: int) -> dict[str, int]:
+    """Return how many project-model records are linked to an electrical model."""
+
+    session = _get_session()
+    try:
+        model = session.get(ElectricalModel, int(electrical_model_id))
+
+        if not model:
+            raise ValueError(
+                f"No existe el modelo eléctrico con ID {electrical_model_id}."
+            )
+
+        project_links_count = (
+            session.query(ProjectElectricalModel)
+            .filter(
+                ProjectElectricalModel.ElectricalModelID == int(electrical_model_id)
+            )
+            .count()
+        )
+
+        modeled_links_count = (
+            session.query(ProjectElectricalModel)
+            .filter(
+                ProjectElectricalModel.ElectricalModelID == int(electrical_model_id),
+                ProjectElectricalModel.IsModeled == 1,
+            )
+            .count()
+        )
+
+        return {
+            "project_links": int(project_links_count),
+            "modeled_links": int(modeled_links_count),
+        }
+    finally:
+        session.close()
+
+
+def delete_model(electrical_model_id: int) -> dict[str, Any]:
+    """Permanently delete an electrical model and its project-model links."""
+
+    session = _get_session()
+    try:
+        model = session.get(ElectricalModel, int(electrical_model_id))
+
+        if not model:
+            raise ValueError(
+                f"No existe el modelo eléctrico con ID {electrical_model_id}."
+            )
+
+        deleted_links = (
+            session.query(ProjectElectricalModel)
+            .filter(
+                ProjectElectricalModel.ElectricalModelID == int(electrical_model_id)
+            )
+            .delete(synchronize_session=False)
+        )
+
+        session.delete(model)
+        session.commit()
+
+        return {
+            "deleted_model": True,
+            "deleted_links": int(deleted_links),
+        }
+
+    except Exception:
+        session.rollback()
+        raise
+    finally:
+        session.close()
+
 def deactivate_model(electrical_model_id: int) -> None:
     """Soft-delete an electrical model."""
 
