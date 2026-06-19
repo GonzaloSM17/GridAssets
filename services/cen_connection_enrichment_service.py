@@ -227,7 +227,8 @@ class CENConnectionEnrichmentService:
                 rows.append(item)
         if not rows:
             return pd.DataFrame(columns=list(projects.columns) + ["match_score"])
-        return pd.DataFrame(rows).sort_values(["match_score", "ProjectName"], ascending=[False, True]).reset_index(drop=True)
+        candidates = pd.DataFrame(rows).sort_values(["match_score", "ProjectName"], ascending=[False, True]).reset_index(drop=True)
+        return _deduplicate_candidates_by_project_id(candidates)
 
     def _result_from_candidates(
         self,
@@ -238,7 +239,9 @@ class CENConnectionEnrichmentService:
         score: float,
         comment: str,
     ) -> dict[str, Any]:
-        candidates = candidates.copy().reset_index(drop=True)
+        candidates = _deduplicate_candidates_by_project_id(candidates).reset_index(drop=True)
+        if candidates.empty:
+            return self._empty_result(base, "not_found", method, "No hay candidato único disponible para aplicar.")
         top = candidates.iloc[0]
         candidate_count = int(len(candidates))
         if candidate_count > 1 and status_if_single == "matched_by_nup":
@@ -300,7 +303,8 @@ class CENConnectionEnrichmentService:
                 "match_comment": comment,
             }
         )
-        self._attach_candidate_columns(result, candidates.head(3) if candidates is not None else pd.DataFrame())
+        clean_candidates = _deduplicate_candidates_by_project_id(candidates) if candidates is not None else pd.DataFrame()
+        self._attach_candidate_columns(result, clean_candidates.head(3))
         return result
 
     @staticmethod
@@ -310,15 +314,28 @@ class CENConnectionEnrichmentService:
             result[f"candidate_{rank}_project_name"] = pd.NA
             result[f"candidate_{rank}_project_type"] = pd.NA
             result[f"candidate_{rank}_project_nup"] = pd.NA
+            result[f"candidate_{rank}_project_entity"] = pd.NA
+            result[f"candidate_{rank}_technology"] = pd.NA
+            result[f"candidate_{rank}_capacity"] = pd.NA
+            result[f"candidate_{rank}_location"] = pd.NA
+            result[f"candidate_{rank}_bay"] = pd.NA
             result[f"candidate_{rank}_score"] = pd.NA
+            result[f"candidate_{rank}_action_summary"] = pd.NA
         if candidates is None or candidates.empty:
             return
+        candidates = _deduplicate_candidates_by_project_id(candidates)
         for idx, (_, candidate) in enumerate(candidates.head(3).iterrows(), start=1):
             result[f"candidate_{idx}_project_id"] = _safe_int(candidate.get("ProjectID"))
             result[f"candidate_{idx}_project_name"] = candidate.get("ProjectName")
             result[f"candidate_{idx}_project_type"] = candidate.get("ProjectType")
             result[f"candidate_{idx}_project_nup"] = candidate.get("NUP")
+            result[f"candidate_{idx}_project_entity"] = candidate.get("ProjectEntityName")
+            result[f"candidate_{idx}_technology"] = candidate.get("TechnologyName")
+            result[f"candidate_{idx}_capacity"] = candidate.get("CapacityValue")
+            result[f"candidate_{idx}_location"] = candidate.get("LocationValue")
+            result[f"candidate_{idx}_bay"] = candidate.get("BayName")
             result[f"candidate_{idx}_score"] = candidate.get("match_score", result.get("match_score"))
+            result[f"candidate_{idx}_action_summary"] = _candidate_action_summary(result, candidate)
 
     def _finalize_preview(self, preview: pd.DataFrame) -> pd.DataFrame:
         result = preview.copy().reset_index(drop=True)
@@ -369,7 +386,10 @@ class CENConnectionEnrichmentService:
         selected_candidate_project_ids = selected_candidate_project_ids or {}
         summary: dict[str, int] = {
             "rows_received": int(len(selected_row_ids or [])),
+            "rows_processed": 0,
             "rows_applied": 0,
+            "rows_with_changes": 0,
+            "rows_without_changes": 0,
             "rows_skipped": 0,
             "projects_enriched": 0,
             "nup_updated": 0,
@@ -401,6 +421,7 @@ class CENConnectionEnrichmentService:
             source_id = self._ensure_source(conn, SOURCE_NAME)
             milestone_ids = {field: self._ensure_milestone(conn, milestone) for field, milestone in DATE_FIELDS.items()}
             for _, row in work.iterrows():
+                summary["rows_processed"] += 1
                 row_id = _safe_int(row.get("preview_row_id"))
                 project_id = _safe_int(selected_candidate_project_ids.get(int(row_id)) if row_id is not None and int(row_id) in selected_candidate_project_ids else row.get("matched_project_id"))
                 if project_id is None:
@@ -418,7 +439,10 @@ class CENConnectionEnrichmentService:
                             summary["rows_applied"] += 1
                             if result.status_changed:
                                 summary["status_updated_to_cancelled"] += 1
-                            details.append(self._detail(row, "applied", result.message, project_id))
+                                summary["rows_with_changes"] += 1
+                            else:
+                                summary["rows_without_changes"] += 1
+                            details.append(self._detail(row, "applied" if result.status_changed else "unchanged", result.message, project_id))
                         continue
 
                     row_changed = False
@@ -450,8 +474,15 @@ class CENConnectionEnrichmentService:
 
                     summary["rows_applied"] += 1
                     if row_changed:
+                        summary["rows_with_changes"] += 1
                         enriched_project_ids.add(project_id)
-                    details.append(self._detail(row, "applied", "Enriquecimiento aplicado.", project_id))
+                        detail_status = "applied"
+                        detail_message = "Enriquecimiento aplicado con cambios."
+                    else:
+                        summary["rows_without_changes"] += 1
+                        detail_status = "unchanged"
+                        detail_message = "Fila procesada sin cambios nuevos en la base de datos."
+                    details.append(self._detail(row, detail_status, detail_message, project_id))
                 except Exception as exc:  # pragma: no cover - defensive UI reporting
                     summary["errors"] += 1
                     details.append(self._detail(row, "error", str(exc), project_id))
@@ -589,6 +620,36 @@ class CENConnectionEnrichmentService:
 # ----------------------------------------------------------------------
 # Small helpers
 # ----------------------------------------------------------------------
+def _deduplicate_candidates_by_project_id(candidates: Optional[pd.DataFrame]) -> pd.DataFrame:
+    """Return candidates sorted by score and unique by ProjectID.
+
+    The database reference can contain repeated rows for the same ProjectID,
+    especially when joins or mixed technology/project structures expand a
+    project. The UI must show each candidate only once; otherwise the manual
+    validation table can display duplicate options with identical scores.
+    """
+    if candidates is None or candidates.empty:
+        return pd.DataFrame()
+    result = candidates.copy()
+    if "ProjectID" not in result.columns:
+        return result.reset_index(drop=True)
+
+    result["_project_id_int"] = result["ProjectID"].apply(_safe_int)
+    result = result.loc[result["_project_id_int"].notna()].copy()
+    if result.empty:
+        return result.drop(columns=["_project_id_int"], errors="ignore").reset_index(drop=True)
+
+    if "match_score" in result.columns:
+        result["_score_sort"] = pd.to_numeric(result["match_score"], errors="coerce").fillna(-1.0)
+    else:
+        result["_score_sort"] = -1.0
+    if "ProjectName" not in result.columns:
+        result["ProjectName"] = ""
+
+    result = result.sort_values(["_score_sort", "ProjectName"], ascending=[False, True])
+    result = result.drop_duplicates(subset=["_project_id_int"], keep="first")
+    return result.drop(columns=["_project_id_int", "_score_sort"], errors="ignore").reset_index(drop=True)
+
 def _filter_compatible_projects(projects: pd.DataFrame, connection_type: Any) -> pd.DataFrame:
     compatible_types = _compatible_project_types(connection_type)
     if not compatible_types:
@@ -765,6 +826,32 @@ def _date_changes_text(row: pd.Series) -> str:
 
 def _would_update_nup_from_row(row: pd.Series) -> bool:
     return _safe_int(row.get("nup")) is not None and row.get("matched_project_id") is not None
+
+
+def _candidate_action_summary(source_row: dict[str, Any], candidate: pd.Series) -> str:
+    """Return the change summary as it would apply to a specific candidate."""
+    action = str(source_row.get("record_action") or "date_enrichment")
+    if action == "status_cancelled":
+        return "Cambiar estado a Cancelled"
+
+    parts: list[str] = []
+    incoming_nup = _safe_int(source_row.get("nup"))
+    candidate_nup = _safe_int(candidate.get("NUP"))
+    if incoming_nup is not None and candidate_nup is None:
+        parts.append("NUP: actualizar")
+    elif incoming_nup is not None and candidate_nup is not None and incoming_nup != candidate_nup:
+        parts.append("NUP: conflicto")
+    elif incoming_nup is not None:
+        parts.append("NUP: sin cambio")
+
+    date_parts: list[str] = []
+    for field, milestone in DATE_FIELDS.items():
+        if _to_datetime(source_row.get(field)) is not None:
+            date_parts.append(milestone)
+    if date_parts:
+        parts.append("Fechas: " + ", ".join(date_parts))
+
+    return ", ".join(parts) if parts else "Sin cambios propuestos"
 
 
 def _action_summary(row: pd.Series) -> str:

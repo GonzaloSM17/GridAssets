@@ -105,7 +105,7 @@ class CENConnectionView:
                 st.warning("No hay resumen de hojas disponible.")
             else:
                 st.dataframe(
-                    CENConnectionView._localize_dataframe(result.sheet_summaries),
+                    CENConnectionView._prepare_display_dataframe(CENConnectionView._localize_dataframe(result.sheet_summaries)),
                     width="stretch",
                     hide_index=True,
                 )
@@ -147,7 +147,7 @@ class CENConnectionView:
         ).round(1).astype(str) + "%"
 
         with st.expander("Cobertura de fechas", expanded=True):
-            st.dataframe(coverage, width="stretch", hide_index=True)
+            st.dataframe(CENConnectionView._prepare_display_dataframe(coverage), width="stretch", hide_index=True)
 
     @staticmethod
     def _render_type_coverage(records: pd.DataFrame) -> None:
@@ -170,7 +170,7 @@ class CENConnectionView:
         if "Tipo normalizado" in coverage.columns:
             coverage["Tipo normalizado"] = coverage["Tipo normalizado"].apply(CENConnectionView._type_label)
         with st.expander("Cobertura por hoja y tipo", expanded=False):
-            st.dataframe(coverage, width="stretch", hide_index=True)
+            st.dataframe(CENConnectionView._prepare_display_dataframe(coverage), width="stretch", hide_index=True)
 
     @staticmethod
     def _render_normalized_preview(records: pd.DataFrame) -> None:
@@ -206,7 +206,7 @@ class CENConnectionView:
             preview["Tipo"] = preview["Tipo"].apply(CENConnectionView._type_label)
 
         with st.expander("Previsualización normalizada", expanded=False):
-            st.dataframe(preview, width="stretch", hide_index=True)
+            st.dataframe(CENConnectionView._prepare_display_dataframe(preview), width="stretch", hide_index=True)
             if len(records) > 100:
                 st.caption(f"Mostrando 100 de {len(records)} filas normalizadas.")
 
@@ -347,7 +347,7 @@ class CENConnectionView:
                         if "Estado" in detail_display.columns:
                             detail_display["Estado"] = detail_display["Estado"].apply(CENConnectionView._apply_status_label)
                         st.dataframe(
-                            CENConnectionView._localize_dataframe(detail_display),
+                            CENConnectionView._prepare_display_dataframe(CENConnectionView._localize_dataframe(detail_display)),
                             width="stretch",
                             hide_index=True,
                         )
@@ -486,7 +486,7 @@ class CENConnectionView:
                 )
             )
             with st.expander("Resumen de estados", expanded=True):
-                st.dataframe(status_counts, width="stretch", hide_index=True)
+                st.dataframe(CENConnectionView._prepare_display_dataframe(status_counts), width="stretch", hide_index=True)
 
     @staticmethod
     def _render_match_tables(preview: pd.DataFrame, profile_key: str) -> list[int]:
@@ -693,16 +693,22 @@ class CENConnectionView:
                 is_first_candidate = candidate_index == 0
                 rows.append(
                     {
-                        "Proyecto archivo": CENConnectionView._short_text(row.get("project_name"), 95) if is_first_candidate else "",
+                        "Proyecto archivo": CENConnectionView._short_text(row.get("project_name"), 95) if is_first_candidate else "↳ mismo proyecto archivo",
                         "Seleccionar": apply_value,
                         "ID fila": row_id,
                         "ID proyecto seleccionado": project_id,
-                        "Proyecto seleccionado": CENConnectionView._short_text(candidate["project_name"], 95),
+                        "Proyecto BD candidato": CENConnectionView._short_text(candidate["project_name"], 95),
                         "Opción": candidate["rank"],
                         "Puntaje": candidate["score_text"],
-                        "Acción": CENConnectionView._action_label(row.get("record_action")) if is_first_candidate else "",
-                        "Tipo": CENConnectionView._type_label(row.get("connection_project_type")) if is_first_candidate else "",
-                        "Cambios": CENConnectionView._short_text(row.get("action_summary") or row.get("date_changes_text") or "", 70) if is_first_candidate else "",
+                        "Tipo BD": candidate["project_type"],
+                        "NUP BD": candidate["nup"],
+                        "Entidad BD": CENConnectionView._short_text(candidate["entity"], 55),
+                        "Tecnología BD": CENConnectionView._short_text(candidate["technology"], 35),
+                        "Capacidad BD": candidate["capacity"],
+                        "Ubicación BD": CENConnectionView._short_text(candidate["location"], 45),
+                        "Cambios sobre candidato": CENConnectionView._short_text(candidate["action_summary"], 95),
+                        "Acción origen": CENConnectionView._action_label(row.get("record_action")) if is_first_candidate else "",
+                        "Tipo origen": CENConnectionView._type_label(row.get("connection_project_type")) if is_first_candidate else "",
                         "Observación": CENConnectionView._short_text(
                             row.get("match_status_label") or row.get("match_comment") or "", 80
                         ) if is_first_candidate else "",
@@ -713,7 +719,7 @@ class CENConnectionView:
             st.info("No hay candidatos disponibles para estas filas.")
             return [], {}, False
 
-        table = pd.DataFrame(rows)
+        table = CENConnectionView._prepare_display_dataframe(pd.DataFrame(rows))
         edited = st.data_editor(
             table,
             key="cen_connection_validation_candidate_table",
@@ -723,12 +729,18 @@ class CENConnectionView:
                 "ID fila",
                 "ID proyecto seleccionado",
                 "Proyecto archivo",
-                "Proyecto seleccionado",
+                "Proyecto BD candidato",
                 "Opción",
                 "Puntaje",
-                "Acción",
-                "Tipo",
-                "Cambios",
+                "Tipo BD",
+                "NUP BD",
+                "Entidad BD",
+                "Tecnología BD",
+                "Capacidad BD",
+                "Ubicación BD",
+                "Cambios sobre candidato",
+                "Acción origen",
+                "Tipo origen",
                 "Observación",
             ],
             column_config={
@@ -786,17 +798,25 @@ class CENConnectionView:
             if project_id is None or project_id in seen or name is None or pd.isna(name):
                 continue
             seen.add(project_id)
-            score_text = ""
+            score_text = "Sin puntaje"
             try:
                 if pd.notna(score):
                     score_text = f"{float(score):.3f}"
             except Exception:
-                score_text = str(score)
+                score_text = str(score) if CENConnectionView._has_display_value(score) else "Sin puntaje"
             candidates.append(
                 {
                     "rank": rank,
                     "project_id": int(project_id),
-                    "project_name": str(name),
+                    "project_name": CENConnectionView._display_value(name, "Sin nombre BD"),
+                    "project_type": CENConnectionView._type_label(row.get(f"candidate_{rank}_project_type")) or "Sin tipo",
+                    "nup": CENConnectionView._display_value(row.get(f"candidate_{rank}_project_nup"), "Sin NUP"),
+                    "entity": CENConnectionView._display_value(row.get(f"candidate_{rank}_project_entity"), "Sin entidad"),
+                    "technology": CENConnectionView._display_value(row.get(f"candidate_{rank}_technology"), "Sin tecnología"),
+                    "capacity": CENConnectionView._display_value(row.get(f"candidate_{rank}_capacity"), "Sin capacidad"),
+                    "location": CENConnectionView._display_value(row.get(f"candidate_{rank}_location"), "Sin ubicación"),
+                    "bay": CENConnectionView._display_value(row.get(f"candidate_{rank}_bay"), "Sin paño"),
+                    "action_summary": CENConnectionView._display_value(row.get(f"candidate_{rank}_action_summary"), "Sin cambios propuestos"),
                     "score_text": score_text,
                 }
             )
@@ -918,7 +938,7 @@ class CENConnectionView:
             return
 
         compact = CENConnectionView._build_compact_preview(preview, include_candidates=False)
-        st.dataframe(compact.head(max_rows), width="stretch", hide_index=True)
+        st.dataframe(CENConnectionView._prepare_display_dataframe(compact.head(max_rows)), width="stretch", hide_index=True)
         if len(compact) > max_rows:
             st.caption(f"Mostrando {max_rows} de {len(compact)} filas.")
 
@@ -1049,32 +1069,34 @@ class CENConnectionView:
 
     @staticmethod
     def _render_apply_summary(summary: dict) -> None:
-        rows = [
-            ("Proyectos enriquecidos", summary.get("projects_enriched", 0)),
-            ("NUP actualizados", summary.get("nup_updated", 0)),
-            ("Fechas insertadas", summary.get("dates_created", 0)),
-            ("Fechas actualizadas", summary.get("dates_updated", 0)),
-            ("A InService", summary.get("status_updated_to_in_service", 0)),
-            ("A UnderConstruction", summary.get("status_updated_to_under_construction", 0)),
-            ("A Planned", summary.get("status_updated_to_planned", 0)),
-            ("A Cancelled", summary.get("status_updated_to_cancelled", 0)),
-            ("Filas omitidas", summary.get("rows_skipped", 0)),
-        ]
-        cols = st.columns(len(rows))
-        for col, (label, value) in zip(cols, rows):
-            col.metric(label, int(value or 0))
-
-        extra_rows = [
-            ("Filas recibidas", summary.get("rows_received", 0)),
-            ("Filas aplicadas", summary.get("rows_applied", 0)),
-            ("Fechas sin cambios", summary.get("dates_unchanged", 0)),
-            ("Conflictos NUP", summary.get("nup_conflicts", 0)),
-            ("Conflictos Cancelled por EO real", summary.get("status_cancelled_conflicts", 0)),
+        primary_rows = [
+            ("Filas seleccionadas", summary.get("rows_received", 0)),
+            ("Filas procesadas", summary.get("rows_processed", summary.get("rows_applied", 0) + summary.get("rows_skipped", 0))),
+            ("Con cambios", summary.get("rows_with_changes", 0)),
+            ("Sin cambios", summary.get("rows_without_changes", 0)),
+            ("Omitidas", summary.get("rows_skipped", 0)),
             ("Errores", summary.get("errors", 0)),
         ]
-        with st.expander("Resumen técnico", expanded=False):
-            summary_df = pd.DataFrame(extra_rows, columns=["Métrica", "Valor"])
-            st.dataframe(summary_df, width="stretch", hide_index=True)
+        cols = st.columns(len(primary_rows))
+        for col, (label, value) in zip(cols, primary_rows):
+            col.metric(label, int(value or 0))
+
+        detail_rows = [
+            ("Proyectos enriquecidos", summary.get("projects_enriched", 0)),
+            ("NUP actualizados", summary.get("nup_updated", 0)),
+            ("Conflictos NUP", summary.get("nup_conflicts", 0)),
+            ("Fechas insertadas", summary.get("dates_created", 0)),
+            ("Fechas actualizadas", summary.get("dates_updated", 0)),
+            ("Fechas sin cambios", summary.get("dates_unchanged", 0)),
+            ("Estados a InService", summary.get("status_updated_to_in_service", 0)),
+            ("Estados a UnderConstruction", summary.get("status_updated_to_under_construction", 0)),
+            ("Estados a Planned", summary.get("status_updated_to_planned", 0)),
+            ("Estados a Cancelled", summary.get("status_updated_to_cancelled", 0)),
+            ("Cancelled omitidos por EO real", summary.get("status_cancelled_conflicts", 0)),
+        ]
+        with st.expander("Detalle del enriquecimiento", expanded=False):
+            summary_df = pd.DataFrame(detail_rows, columns=["Métrica", "Valor"])
+            st.dataframe(CENConnectionView._prepare_display_dataframe(summary_df), width="stretch", hide_index=True)
 
     @staticmethod
     def _render_download(records: pd.DataFrame, profile_key: str) -> None:
@@ -1253,7 +1275,23 @@ class CENConnectionView:
                     result[col] = result[col].apply(CENConnectionView._status_label)
                 elif col == "status":
                     result[col] = result[col].apply(CENConnectionView._parser_status_label)
-        return result.rename(columns=column_labels)
+        return CENConnectionView._prepare_display_dataframe(result.rename(columns=column_labels))
+
+    @staticmethod
+    def _prepare_display_dataframe(df: pd.DataFrame) -> pd.DataFrame:
+        """Return a dataframe safe for Streamlit display.
+
+        PyArrow/Streamlit cannot render dataframes with duplicated column names.
+        Some localized tables can naturally map multiple technical fields to the
+        same Spanish label (for example status and match_status -> Estado). For
+        visual tables we keep the first occurrence and drop duplicate display
+        columns. The technical CSV downloads remain untouched.
+        """
+        if df is None or df.empty:
+            return df
+        result = df.copy()
+        result = result.loc[:, ~pd.Index(result.columns).duplicated(keep="first")]
+        return result.reset_index(drop=True)
 
     @staticmethod
     def _date_label(field: str) -> str:
@@ -1263,6 +1301,23 @@ class CENConnectionView:
             "cod_actual": "EO real",
             "cod_estimated": "EO estimada",
         }.get(field, field)
+
+    @staticmethod
+    def _has_display_value(value) -> bool:
+        if value is None:
+            return False
+        try:
+            if pd.isna(value):
+                return False
+        except Exception:
+            pass
+        return str(value).strip() != ""
+
+    @staticmethod
+    def _display_value(value, fallback: str = "Sin información") -> str:
+        if not CENConnectionView._has_display_value(value):
+            return fallback
+        return str(value)
 
     @staticmethod
     def _short_text(value, limit: int) -> str:
