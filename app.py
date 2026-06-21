@@ -68,10 +68,8 @@ class ProjectApp:
 
             st.divider()
             CENConnectionView.render_expander(expanded=False)
-
             st.divider()
             ScraperView.render_web_scraper_panel()
-
             ProjectView.render_project_tabs(
                 df=df,
                 project_types=project_types,
@@ -122,7 +120,6 @@ class ProjectApp:
                 st.divider()
                 DBStatusView.render_status_panel()
                 st.divider()
-
                 if db_ready:
                     CNEIngestionView.render_cne_panel_column()
                 else:

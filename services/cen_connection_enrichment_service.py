@@ -7,6 +7,7 @@ This service owns the database-facing part of the CEN Conexiones workflow:
 - write NUP and RelevantDate values;
 - delegate derived status changes to ProjectStatusService.
 """
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -32,7 +33,12 @@ DATE_FIELDS: dict[str, str] = {
     "cod_estimated": "COD_Estimated",
 }
 AUTO_STATUSES = {"matched_by_nup", "matched_by_name"}
-REVIEW_STATUSES = {"candidate_by_name", "ambiguous_name", "ambiguous_nup", "nup_type_mismatch"}
+REVIEW_STATUSES = {
+    "candidate_by_name",
+    "ambiguous_name",
+    "ambiguous_nup",
+    "nup_type_mismatch",
+}
 
 
 @dataclass(frozen=True)
@@ -40,14 +46,18 @@ class MatchThresholds:
     """Name matching thresholds used by the preview service."""
 
     auto_name_score: float = 0.97
-    review_name_score: float = 0.93
+    review_name_score: float = 0.88
     ambiguity_delta: float = 0.03
 
 
 class CENConnectionEnrichmentService:
     """Match and apply CEN connection enrichment rows to existing projects."""
 
-    def __init__(self, engine: Optional[Engine] = None, thresholds: Optional[MatchThresholds] = None) -> None:
+    def __init__(
+        self,
+        engine: Optional[Engine] = None,
+        thresholds: Optional[MatchThresholds] = None,
+    ) -> None:
         self.engine = engine or get_sqlserver_engine()
         self.thresholds = thresholds or MatchThresholds()
 
@@ -55,8 +65,7 @@ class CENConnectionEnrichmentService:
     # Preview / matching
     # ------------------------------------------------------------------
     def load_project_reference(self) -> pd.DataFrame:
-        query = text(
-            """
+        query = text("""
             SELECT
                 p.ProjectID,
                 p.ProjectName,
@@ -77,26 +86,37 @@ class CENConnectionEnrichmentService:
             LEFT JOIN Technology td ON td.TechnologyID = dp.TechnologyID
             LEFT JOIN Technology tb ON tb.TechnologyID = bp.TechnologyID
             LEFT JOIN Bay b ON b.BayID = COALESCE(gp.BayID, dp.BayID, bp.BayID)
-            """
-        )
+            """)
         with self.engine.connect() as conn:
             projects = pd.read_sql_query(query, conn)
         if projects.empty:
             return self._empty_project_reference()
         projects = projects.copy()
         projects["nup_key"] = projects["NUP"].apply(_normalize_nup_key)
-        projects["normalized_project_name"] = projects["ProjectName"].apply(normalize_project_name)
-        projects["normalized_entity_name"] = projects["ProjectEntityName"].apply(_normalize_text)
-        projects["normalized_technology"] = projects["TechnologyName"].apply(_normalize_text)
-        projects["normalized_location"] = projects["LocationValue"].apply(_normalize_text)
-        projects["project_type_key"] = projects["ProjectType"].apply(_normalize_type_key)
+        projects["normalized_project_name"] = projects["ProjectName"].apply(
+            normalize_project_name
+        )
+        projects["normalized_entity_name"] = projects["ProjectEntityName"].apply(
+            _normalize_text
+        )
+        projects["normalized_technology"] = projects["TechnologyName"].apply(
+            _normalize_text
+        )
+        projects["normalized_location"] = projects["LocationValue"].apply(
+            _normalize_text
+        )
+        projects["project_type_key"] = projects["ProjectType"].apply(
+            _normalize_type_key
+        )
         return projects
 
     def build_match_preview(self, records: pd.DataFrame) -> pd.DataFrame:
         projects = self.load_project_reference()
         return self.build_match_preview_from_projects(records, projects)
 
-    def build_match_preview_from_projects(self, records: pd.DataFrame, projects: pd.DataFrame) -> pd.DataFrame:
+    def build_match_preview_from_projects(
+        self, records: pd.DataFrame, projects: pd.DataFrame
+    ) -> pd.DataFrame:
         if records is None or records.empty:
             return pd.DataFrame()
         if projects is None or projects.empty:
@@ -110,13 +130,25 @@ class CENConnectionEnrichmentService:
             return self._finalize_preview(preview)
 
         work = records.copy().reset_index(drop=True)
-        for col in ["nup", "project_name", "connection_project_type", "company", "technology", "record_action"]:
+        for col in [
+            "nup",
+            "project_name",
+            "connection_project_type",
+            "company",
+            "technology",
+            "record_action",
+        ]:
             if col not in work.columns:
                 work[col] = pd.NA
         work["preview_row_id"] = work.index.astype(int)
-        work["normalized_project_name"] = work.get("normalized_project_name", work["project_name"].apply(normalize_project_name))
+        work["normalized_project_name"] = work.get(
+            "normalized_project_name",
+            work["project_name"].apply(normalize_project_name),
+        )
         work["nup_key"] = work["nup"].apply(_normalize_nup_key)
-        work["connection_type_key"] = work["connection_project_type"].apply(_normalize_type_key)
+        work["connection_type_key"] = work["connection_project_type"].apply(
+            _normalize_type_key
+        )
         work["normalized_company"] = work["company"].apply(_normalize_text)
 
         rows: list[dict[str, Any]] = []
@@ -137,13 +169,17 @@ class CENConnectionEnrichmentService:
 
     def _match_one(self, record: pd.Series, projects: pd.DataFrame) -> dict[str, Any]:
         base = record.to_dict()
-        compatible = _filter_compatible_projects(projects, record.get("connection_type_key"))
+        compatible = _filter_compatible_projects(
+            projects, record.get("connection_type_key")
+        )
         nup_key = record.get("nup_key")
 
         if _has_value(nup_key):
             nup_candidates = projects.loc[projects["nup_key"] == nup_key].copy()
             if not nup_candidates.empty:
-                typed_nup_candidates = _filter_compatible_projects(nup_candidates, record.get("connection_type_key"))
+                typed_nup_candidates = _filter_compatible_projects(
+                    nup_candidates, record.get("connection_type_key")
+                )
                 if not typed_nup_candidates.empty:
                     return self._result_from_candidates(
                         base,
@@ -164,16 +200,26 @@ class CENConnectionEnrichmentService:
 
         name = record.get("normalized_project_name")
         if not _has_value(name):
-            return self._empty_result(base, "no_project_name", "none", "Sin NUP y sin nombre útil para matching.")
+            return self._empty_result(
+                base,
+                "no_project_name",
+                "none",
+                "Sin NUP y sin nombre útil para matching.",
+            )
 
         name_candidates = self._score_name_candidates(record, compatible)
         if name_candidates.empty and len(compatible) != len(projects):
             name_candidates = self._score_name_candidates(record, projects)
         if name_candidates.empty:
-            return self._empty_result(base, "not_found", "name", "No hay candidato con puntaje suficiente.")
+            return self._empty_result(
+                base, "not_found", "name", "No hay candidato con puntaje suficiente."
+            )
 
         best_score = float(name_candidates.iloc[0]["match_score"])
-        top_band = name_candidates.loc[name_candidates["match_score"] >= best_score - self.thresholds.ambiguity_delta]
+        top_band = name_candidates.loc[
+            name_candidates["match_score"]
+            >= best_score - self.thresholds.ambiguity_delta
+        ]
         if best_score >= self.thresholds.auto_name_score and len(top_band) == 1:
             return self._result_from_candidates(
                 base,
@@ -202,7 +248,9 @@ class CENConnectionEnrichmentService:
             candidates=name_candidates.head(3),
         )
 
-    def _score_name_candidates(self, record: pd.Series, projects: pd.DataFrame) -> pd.DataFrame:
+    def _score_name_candidates(
+        self, record: pd.Series, projects: pd.DataFrame
+    ) -> pd.DataFrame:
         if projects.empty:
             return projects.copy()
         name = record.get("normalized_project_name")
@@ -213,12 +261,23 @@ class CENConnectionEnrichmentService:
             project_name = project.get("normalized_project_name")
             if not _has_value(project_name):
                 continue
-            score = max(_name_similarity(name, project_name), _token_similarity(name, project_name))
+            score = max(
+                _name_similarity(name, project_name),
+                _token_similarity(name, project_name),
+            )
             entity = project.get("normalized_entity_name")
-            if _has_value(company) and _has_value(entity) and _token_overlap(company, entity) >= 0.5:
+            if (
+                _has_value(company)
+                and _has_value(entity)
+                and _token_overlap(company, entity) >= 0.5
+            ):
                 score += 0.04
             project_technology = project.get("normalized_technology")
-            if _has_value(technology) and _has_value(project_technology) and _token_overlap(technology, project_technology) >= 0.5:
+            if (
+                _has_value(technology)
+                and _has_value(project_technology)
+                and _token_overlap(technology, project_technology) >= 0.5
+            ):
                 score += 0.02
             score = min(float(score), 1.0)
             if score >= self.thresholds.review_name_score:
@@ -227,7 +286,11 @@ class CENConnectionEnrichmentService:
                 rows.append(item)
         if not rows:
             return pd.DataFrame(columns=list(projects.columns) + ["match_score"])
-        candidates = pd.DataFrame(rows).sort_values(["match_score", "ProjectName"], ascending=[False, True]).reset_index(drop=True)
+        candidates = (
+            pd.DataFrame(rows)
+            .sort_values(["match_score", "ProjectName"], ascending=[False, True])
+            .reset_index(drop=True)
+        )
         return _deduplicate_candidates_by_project_id(candidates)
 
     def _result_from_candidates(
@@ -239,9 +302,16 @@ class CENConnectionEnrichmentService:
         score: float,
         comment: str,
     ) -> dict[str, Any]:
-        candidates = _deduplicate_candidates_by_project_id(candidates).reset_index(drop=True)
+        candidates = _deduplicate_candidates_by_project_id(candidates).reset_index(
+            drop=True
+        )
         if candidates.empty:
-            return self._empty_result(base, "not_found", method, "No hay candidato único disponible para aplicar.")
+            return self._empty_result(
+                base,
+                "not_found",
+                method,
+                "No hay candidato único disponible para aplicar.",
+            )
         top = candidates.iloc[0]
         candidate_count = int(len(candidates))
         if candidate_count > 1 and status_if_single == "matched_by_nup":
@@ -296,19 +366,29 @@ class CENConnectionEnrichmentService:
                 "matched_project_nup": pd.NA,
                 "match_score": round(float(score), 4),
                 "name_score": round(float(score), 4),
-                "candidate_count": int(len(candidates)) if candidates is not None else 0,
-                "top_candidates": _format_candidates(candidates) if candidates is not None else "",
+                "candidate_count": (
+                    int(len(candidates)) if candidates is not None else 0
+                ),
+                "top_candidates": (
+                    _format_candidates(candidates) if candidates is not None else ""
+                ),
                 "proposed_action": "skip",
                 "comment": comment,
                 "match_comment": comment,
             }
         )
-        clean_candidates = _deduplicate_candidates_by_project_id(candidates) if candidates is not None else pd.DataFrame()
+        clean_candidates = (
+            _deduplicate_candidates_by_project_id(candidates)
+            if candidates is not None
+            else pd.DataFrame()
+        )
         self._attach_candidate_columns(result, clean_candidates.head(3))
         return result
 
     @staticmethod
-    def _attach_candidate_columns(result: dict[str, Any], candidates: pd.DataFrame) -> None:
+    def _attach_candidate_columns(
+        result: dict[str, Any], candidates: pd.DataFrame
+    ) -> None:
         for rank in (1, 2, 3):
             result[f"candidate_{rank}_project_id"] = pd.NA
             result[f"candidate_{rank}_project_name"] = pd.NA
@@ -325,28 +405,50 @@ class CENConnectionEnrichmentService:
             return
         candidates = _deduplicate_candidates_by_project_id(candidates)
         for idx, (_, candidate) in enumerate(candidates.head(3).iterrows(), start=1):
-            result[f"candidate_{idx}_project_id"] = _safe_int(candidate.get("ProjectID"))
+            result[f"candidate_{idx}_project_id"] = _safe_int(
+                candidate.get("ProjectID")
+            )
             result[f"candidate_{idx}_project_name"] = candidate.get("ProjectName")
             result[f"candidate_{idx}_project_type"] = candidate.get("ProjectType")
             result[f"candidate_{idx}_project_nup"] = candidate.get("NUP")
-            result[f"candidate_{idx}_project_entity"] = candidate.get("ProjectEntityName")
+            result[f"candidate_{idx}_project_entity"] = candidate.get(
+                "ProjectEntityName"
+            )
             result[f"candidate_{idx}_technology"] = candidate.get("TechnologyName")
             result[f"candidate_{idx}_capacity"] = candidate.get("CapacityValue")
             result[f"candidate_{idx}_location"] = candidate.get("LocationValue")
             result[f"candidate_{idx}_bay"] = candidate.get("BayName")
-            result[f"candidate_{idx}_score"] = candidate.get("match_score", result.get("match_score"))
-            result[f"candidate_{idx}_action_summary"] = _candidate_action_summary(result, candidate)
+            result[f"candidate_{idx}_score"] = candidate.get(
+                "match_score", result.get("match_score")
+            )
+            result[f"candidate_{idx}_action_summary"] = _candidate_action_summary(
+                result, candidate
+            )
 
     def _finalize_preview(self, preview: pd.DataFrame) -> pd.DataFrame:
         result = preview.copy().reset_index(drop=True)
         if "preview_row_id" not in result.columns:
             result["preview_row_id"] = result.index.astype(int)
-        status = result.get("match_status", pd.Series([""] * len(result), index=result.index)).fillna("").astype(str)
+        status = (
+            result.get(
+                "match_status", pd.Series([""] * len(result), index=result.index)
+            )
+            .fillna("")
+            .astype(str)
+        )
         result["match_group"] = status.map(
-            lambda value: "auto_proposed" if value in AUTO_STATUSES else "needs_validation" if value in REVIEW_STATUSES else "no_candidate"
+            lambda value: (
+                "auto_proposed"
+                if value in AUTO_STATUSES
+                else "needs_validation" if value in REVIEW_STATUSES else "no_candidate"
+            )
         )
         result["match_group_label"] = result["match_group"].map(
-            {"auto_proposed": "Propuestos", "needs_validation": "Por validar", "no_candidate": "Sin candidato"}
+            {
+                "auto_proposed": "Propuestos",
+                "needs_validation": "Por validar",
+                "no_candidate": "Sin candidato",
+            }
         )
         result["match_status_label"] = status.map(
             {
@@ -360,14 +462,29 @@ class CENConnectionEnrichmentService:
                 "no_project_name": "Sin nombre usable",
             }
         ).fillna(status)
-        score = pd.to_numeric(result.get("match_score", pd.Series([None] * len(result), index=result.index)), errors="coerce")
-        result["score_display"] = score.map(lambda value: "" if pd.isna(value) else f"{value:.3f}")
-        result["can_apply"] = result["match_group"].isin({"auto_proposed", "needs_validation"}) & result.get(
-            "matched_project_id", pd.Series([None] * len(result), index=result.index)
-        ).notna()
-        result["default_apply"] = result["match_group"].eq("auto_proposed") & result.get(
-            "matched_project_id", pd.Series([None] * len(result), index=result.index)
-        ).notna()
+        score = pd.to_numeric(
+            result.get(
+                "match_score", pd.Series([None] * len(result), index=result.index)
+            ),
+            errors="coerce",
+        )
+        result["score_display"] = score.map(
+            lambda value: "" if pd.isna(value) else f"{value:.3f}"
+        )
+        result["can_apply"] = (
+            result["match_group"].isin({"auto_proposed", "needs_validation"})
+            & result.get(
+                "matched_project_id",
+                pd.Series([None] * len(result), index=result.index),
+            ).notna()
+        )
+        result["default_apply"] = (
+            result["match_group"].eq("auto_proposed")
+            & result.get(
+                "matched_project_id",
+                pd.Series([None] * len(result), index=result.index),
+            ).notna()
+        )
         result["would_update_nup"] = result.apply(_would_update_nup_from_row, axis=1)
         result["date_changes_proposed"] = result.apply(_count_date_values, axis=1)
         result["date_changes_text"] = result.apply(_date_changes_text, axis=1)
@@ -419,22 +536,45 @@ class CENConnectionEnrichmentService:
         now = datetime.utcnow()
         with self.engine.begin() as conn:
             source_id = self._ensure_source(conn, SOURCE_NAME)
-            milestone_ids = {field: self._ensure_milestone(conn, milestone) for field, milestone in DATE_FIELDS.items()}
+            milestone_ids = {
+                field: self._ensure_milestone(conn, milestone)
+                for field, milestone in DATE_FIELDS.items()
+            }
             for _, row in work.iterrows():
                 summary["rows_processed"] += 1
                 row_id = _safe_int(row.get("preview_row_id"))
-                project_id = _safe_int(selected_candidate_project_ids.get(int(row_id)) if row_id is not None and int(row_id) in selected_candidate_project_ids else row.get("matched_project_id"))
+                project_id = _safe_int(
+                    selected_candidate_project_ids.get(int(row_id))
+                    if row_id is not None
+                    and int(row_id) in selected_candidate_project_ids
+                    else row.get("matched_project_id")
+                )
                 if project_id is None:
                     summary["rows_skipped"] += 1
-                    details.append(self._detail(row, "omitted", "Fila omitida: sin ID de proyecto BD seleccionado."))
+                    details.append(
+                        self._detail(
+                            row,
+                            "omitted",
+                            "Fila omitida: sin ID de proyecto BD seleccionado.",
+                        )
+                    )
                     continue
                 try:
-                    if str(row.get("record_action") or "date_enrichment") == "status_cancelled":
-                        result = ProjectStatusService.set_cancelled_if_no_cod_actual(conn, project_id)
+                    if (
+                        str(row.get("record_action") or "date_enrichment")
+                        == "status_cancelled"
+                    ):
+                        result = ProjectStatusService.set_cancelled_if_no_cod_actual(
+                            conn, project_id
+                        )
                         if result.blocked_by_cod_actual:
                             summary["status_cancelled_conflicts"] += 1
                             summary["rows_skipped"] += 1
-                            details.append(self._detail(row, "conflict", result.message, project_id))
+                            details.append(
+                                self._detail(
+                                    row, "conflict", result.message, project_id
+                                )
+                            )
                         else:
                             summary["rows_applied"] += 1
                             if result.status_changed:
@@ -442,7 +582,14 @@ class CENConnectionEnrichmentService:
                                 summary["rows_with_changes"] += 1
                             else:
                                 summary["rows_without_changes"] += 1
-                            details.append(self._detail(row, "applied" if result.status_changed else "unchanged", result.message, project_id))
+                            details.append(
+                                self._detail(
+                                    row,
+                                    "applied" if result.status_changed else "unchanged",
+                                    result.message,
+                                    project_id,
+                                )
+                            )
                         continue
 
                     row_changed = False
@@ -458,7 +605,9 @@ class CENConnectionEnrichmentService:
                         if date_value is None:
                             continue
                         touched_date = True
-                        action = self._upsert_relevant_date(conn, project_id, milestone_id, source_id, date_value, now)
+                        action = self._upsert_relevant_date(
+                            conn, project_id, milestone_id, source_id, date_value, now
+                        )
                         if action == "created":
                             summary["dates_created"] += 1
                             row_changed = True
@@ -469,7 +618,11 @@ class CENConnectionEnrichmentService:
                             summary["dates_unchanged"] += 1
 
                     if touched_date:
-                        status_result = ProjectStatusService.sync_project_status_from_dates(conn, project_id)
+                        status_result = (
+                            ProjectStatusService.sync_project_status_from_dates(
+                                conn, project_id
+                            )
+                        )
                         self._count_status_result(summary, status_result)
 
                     summary["rows_applied"] += 1
@@ -481,8 +634,12 @@ class CENConnectionEnrichmentService:
                     else:
                         summary["rows_without_changes"] += 1
                         detail_status = "unchanged"
-                        detail_message = "Fila procesada sin cambios nuevos en la base de datos."
-                    details.append(self._detail(row, detail_status, detail_message, project_id))
+                        detail_message = (
+                            "Fila procesada sin cambios nuevos en la base de datos."
+                        )
+                    details.append(
+                        self._detail(row, detail_status, detail_message, project_id)
+                    )
                 except Exception as exc:  # pragma: no cover - defensive UI reporting
                     summary["errors"] += 1
                     details.append(self._detail(row, "error", str(exc), project_id))
@@ -505,21 +662,39 @@ class CENConnectionEnrichmentService:
 
     @staticmethod
     def _ensure_source(conn: Any, source_name: str) -> int:
-        source_id = conn.execute(text("SELECT SourceID FROM Source WHERE SourceName = :name"), {"name": source_name}).scalar()
+        source_id = conn.execute(
+            text("SELECT SourceID FROM Source WHERE SourceName = :name"),
+            {"name": source_name},
+        ).scalar()
         if source_id is None:
-            conn.execute(text("INSERT INTO Source (SourceName) VALUES (:name)"), {"name": source_name})
-            source_id = conn.execute(text("SELECT SourceID FROM Source WHERE SourceName = :name"), {"name": source_name}).scalar()
+            conn.execute(
+                text("INSERT INTO Source (SourceName) VALUES (:name)"),
+                {"name": source_name},
+            )
+            source_id = conn.execute(
+                text("SELECT SourceID FROM Source WHERE SourceName = :name"),
+                {"name": source_name},
+            ).scalar()
         return int(source_id)
 
     @staticmethod
     def _ensure_milestone(conn: Any, milestone_name: str) -> int:
         milestone_id = conn.execute(
-            text("SELECT MilestoneTypeID FROM MilestoneType WHERE MilestoneName = :name"), {"name": milestone_name}
+            text(
+                "SELECT MilestoneTypeID FROM MilestoneType WHERE MilestoneName = :name"
+            ),
+            {"name": milestone_name},
         ).scalar()
         if milestone_id is None:
-            conn.execute(text("INSERT INTO MilestoneType (MilestoneName) VALUES (:name)"), {"name": milestone_name})
+            conn.execute(
+                text("INSERT INTO MilestoneType (MilestoneName) VALUES (:name)"),
+                {"name": milestone_name},
+            )
             milestone_id = conn.execute(
-                text("SELECT MilestoneTypeID FROM MilestoneType WHERE MilestoneName = :name"), {"name": milestone_name}
+                text(
+                    "SELECT MilestoneTypeID FROM MilestoneType WHERE MilestoneName = :name"
+                ),
+                {"name": milestone_name},
             ).scalar()
         return int(milestone_id)
 
@@ -528,10 +703,16 @@ class CENConnectionEnrichmentService:
         incoming_nup = _safe_int(row.get("nup"))
         if incoming_nup is None:
             return False
-        current_nup = conn.execute(text("SELECT NUP FROM Project WHERE ProjectID = :project_id"), {"project_id": project_id}).scalar()
+        current_nup = conn.execute(
+            text("SELECT NUP FROM Project WHERE ProjectID = :project_id"),
+            {"project_id": project_id},
+        ).scalar()
         if current_nup is not None:
             return False
-        conn.execute(text("UPDATE Project SET NUP = :nup WHERE ProjectID = :project_id"), {"nup": incoming_nup, "project_id": project_id})
+        conn.execute(
+            text("UPDATE Project SET NUP = :nup WHERE ProjectID = :project_id"),
+            {"nup": incoming_nup, "project_id": project_id},
+        )
         return True
 
     @staticmethod
@@ -539,31 +720,45 @@ class CENConnectionEnrichmentService:
         incoming_nup = _safe_int(row.get("nup"))
         if incoming_nup is None:
             return False
-        current_nup = conn.execute(text("SELECT NUP FROM Project WHERE ProjectID = :project_id"), {"project_id": project_id}).scalar()
+        current_nup = conn.execute(
+            text("SELECT NUP FROM Project WHERE ProjectID = :project_id"),
+            {"project_id": project_id},
+        ).scalar()
         return current_nup is not None and int(current_nup) != int(incoming_nup)
 
     @staticmethod
-    def _upsert_relevant_date(conn: Any, project_id: int, milestone_id: int, source_id: int, date_value: datetime, extracted_at: datetime) -> str:
-        existing = conn.execute(
-            text(
-                """
+    def _upsert_relevant_date(
+        conn: Any,
+        project_id: int,
+        milestone_id: int,
+        source_id: int,
+        date_value: datetime,
+        extracted_at: datetime,
+    ) -> str:
+        existing = (
+            conn.execute(
+                text("""
                 SELECT RelevantDateID, DateValue
                 FROM RelevantDate
                 WHERE ProjectID = :project_id
                   AND MilestoneTypeID = :milestone_id
                   AND SourceID = :source_id
-                """
-            ),
-            {"project_id": project_id, "milestone_id": milestone_id, "source_id": source_id},
-        ).mappings().first()
+                """),
+                {
+                    "project_id": project_id,
+                    "milestone_id": milestone_id,
+                    "source_id": source_id,
+                },
+            )
+            .mappings()
+            .first()
+        )
         if existing is None:
             conn.execute(
-                text(
-                    """
+                text("""
                     INSERT INTO RelevantDate (ProjectID, MilestoneTypeID, SourceID, DateValue, ExtractedAt)
                     VALUES (:project_id, :milestone_id, :source_id, :date_value, :extracted_at)
-                    """
-                ),
+                    """),
                 {
                     "project_id": project_id,
                     "milestone_id": milestone_id,
@@ -577,21 +772,31 @@ class CENConnectionEnrichmentService:
         if old_date is not None and old_date.date() == date_value.date():
             return "unchanged"
         conn.execute(
-            text(
-                """
+            text("""
                 UPDATE RelevantDate
                 SET DateValue = :date_value, ExtractedAt = :extracted_at
                 WHERE RelevantDateID = :relevant_date_id
-                """
-            ),
-            {"date_value": date_value, "extracted_at": extracted_at, "relevant_date_id": existing["RelevantDateID"]},
+                """),
+            {
+                "date_value": date_value,
+                "extracted_at": extracted_at,
+                "relevant_date_id": existing["RelevantDateID"],
+            },
         )
         return "updated"
 
     @staticmethod
-    def _detail(row: pd.Series, status: str, message: str, project_id: Optional[int] = None) -> dict[str, Any]:
+    def _detail(
+        row: pd.Series, status: str, message: str, project_id: Optional[int] = None
+    ) -> dict[str, Any]:
         data = row.to_dict()
-        data.update({"status": status, "message": message, "matched_project_id": project_id or row.get("matched_project_id")})
+        data.update(
+            {
+                "status": status,
+                "message": message,
+                "matched_project_id": project_id or row.get("matched_project_id"),
+            }
+        )
         return data
 
     @staticmethod
@@ -620,7 +825,9 @@ class CENConnectionEnrichmentService:
 # ----------------------------------------------------------------------
 # Small helpers
 # ----------------------------------------------------------------------
-def _deduplicate_candidates_by_project_id(candidates: Optional[pd.DataFrame]) -> pd.DataFrame:
+def _deduplicate_candidates_by_project_id(
+    candidates: Optional[pd.DataFrame],
+) -> pd.DataFrame:
     """Return candidates sorted by score and unique by ProjectID.
 
     The database reference can contain repeated rows for the same ProjectID,
@@ -637,10 +844,14 @@ def _deduplicate_candidates_by_project_id(candidates: Optional[pd.DataFrame]) ->
     result["_project_id_int"] = result["ProjectID"].apply(_safe_int)
     result = result.loc[result["_project_id_int"].notna()].copy()
     if result.empty:
-        return result.drop(columns=["_project_id_int"], errors="ignore").reset_index(drop=True)
+        return result.drop(columns=["_project_id_int"], errors="ignore").reset_index(
+            drop=True
+        )
 
     if "match_score" in result.columns:
-        result["_score_sort"] = pd.to_numeric(result["match_score"], errors="coerce").fillna(-1.0)
+        result["_score_sort"] = pd.to_numeric(
+            result["match_score"], errors="coerce"
+        ).fillna(-1.0)
     else:
         result["_score_sort"] = -1.0
     if "ProjectName" not in result.columns:
@@ -648,9 +859,14 @@ def _deduplicate_candidates_by_project_id(candidates: Optional[pd.DataFrame]) ->
 
     result = result.sort_values(["_score_sort", "ProjectName"], ascending=[False, True])
     result = result.drop_duplicates(subset=["_project_id_int"], keep="first")
-    return result.drop(columns=["_project_id_int", "_score_sort"], errors="ignore").reset_index(drop=True)
+    return result.drop(
+        columns=["_project_id_int", "_score_sort"], errors="ignore"
+    ).reset_index(drop=True)
 
-def _filter_compatible_projects(projects: pd.DataFrame, connection_type: Any) -> pd.DataFrame:
+
+def _filter_compatible_projects(
+    projects: pd.DataFrame, connection_type: Any
+) -> pd.DataFrame:
     compatible_types = _compatible_project_types(connection_type)
     if not compatible_types:
         return projects.copy()
@@ -746,7 +962,9 @@ def _token_overlap(left: Any, right: Any) -> float:
     right_tokens = set(str(right).split())
     if not left_tokens or not right_tokens:
         return 0.0
-    return len(left_tokens.intersection(right_tokens)) / min(len(left_tokens), len(right_tokens))
+    return len(left_tokens.intersection(right_tokens)) / min(
+        len(left_tokens), len(right_tokens)
+    )
 
 
 def _format_candidates(candidates: Optional[pd.DataFrame]) -> str:
@@ -821,11 +1039,18 @@ def _date_changes_text(row: pd.Series) -> str:
         "cod_actual": "EO real",
         "cod_estimated": "EO est.",
     }
-    return ", ".join(label for field, label in labels.items() if _to_datetime(row.get(field)) is not None)
+    return ", ".join(
+        label
+        for field, label in labels.items()
+        if _to_datetime(row.get(field)) is not None
+    )
 
 
 def _would_update_nup_from_row(row: pd.Series) -> bool:
-    return _safe_int(row.get("nup")) is not None and row.get("matched_project_id") is not None
+    return (
+        _safe_int(row.get("nup")) is not None
+        and row.get("matched_project_id") is not None
+    )
 
 
 def _candidate_action_summary(source_row: dict[str, Any], candidate: pd.Series) -> str:
@@ -839,7 +1064,11 @@ def _candidate_action_summary(source_row: dict[str, Any], candidate: pd.Series) 
     candidate_nup = _safe_int(candidate.get("NUP"))
     if incoming_nup is not None and candidate_nup is None:
         parts.append("NUP: actualizar")
-    elif incoming_nup is not None and candidate_nup is not None and incoming_nup != candidate_nup:
+    elif (
+        incoming_nup is not None
+        and candidate_nup is not None
+        and incoming_nup != candidate_nup
+    ):
         parts.append("NUP: conflicto")
     elif incoming_nup is not None:
         parts.append("NUP: sin cambio")

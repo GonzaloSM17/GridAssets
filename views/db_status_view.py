@@ -10,6 +10,7 @@ from sqlalchemy import create_engine, inspect as sa_inspect, text
 from database.db_connection import get_connection_string, get_sqlserver_engine
 from database.db_create_sqlserver import SQLServerSchemaCreator
 from database.db_orm_model import Base
+from services.project_data_service import ProjectDataService
 
 EXPECTED_TABLES: list[str] = sorted({table.name for table in Base.metadata.sorted_tables})
 
@@ -146,17 +147,45 @@ class DBStatusView:
         DBStatusView._create_schema()
 
     @staticmethod
+    def _synchronize_database() -> None:
+        """Clear cached database-backed data and rerun Streamlit."""
+        ProjectDataService.clear_loaded_data()
+        st.session_state.pop("db_status", None)
+        st.toast("Base de datos sincronizada.", icon="🔄")
+        st.rerun()
+
+    @staticmethod
     def render_status_panel() -> None:
         """Render the database status panel."""
         st.markdown("**Base de datos**")
-        verify = st.button(
-            "Verificar",
-            use_container_width=True,
-            key="db_verify_button",
-            help="Comprueba la conexión a SQL Server y verifica las tablas ORM.",
-        )
 
-        status = DBStatusView.get_status(force_refresh=verify)
+        status = DBStatusView.get_status()
+        sync_disabled = not DBStatusView.is_ready(status)
+
+        verify_col, sync_col = st.columns([1, 1], gap="small")
+        with verify_col:
+            verify = st.button(
+                "Verificar",
+                use_container_width=True,
+                key="db_verify_button",
+                help="Comprueba la conexión a SQL Server y verifica las tablas ORM.",
+            )
+        with sync_col:
+            synchronize = st.button(
+                "Sincronizar base de datos",
+                type="primary",
+                use_container_width=True,
+                key="db_synchronize_button",
+                disabled=sync_disabled,
+                help="Limpia la caché de datos y vuelve a consultar la base de datos activa.",
+            )
+
+        if synchronize:
+            DBStatusView._synchronize_database()
+
+        if verify:
+            status = DBStatusView.get_status(force_refresh=True)
+
         if not status:
             return
 

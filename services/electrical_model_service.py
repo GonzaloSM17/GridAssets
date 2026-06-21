@@ -20,6 +20,8 @@ DEFAULT_SOFTWARE_NAMES = [
 
 
 VALID_INCLUSION_MODES = {"operation", "operation_projected"}
+DEFAULT_APPLY_CAPACITY_FILTER = True
+DEFAULT_MIN_MODELING_CAPACITY_MW = 20.0
 
 
 def _get_session():
@@ -403,6 +405,8 @@ def preview_projects_for_bulk_modeling_by_cod(
     project_type: str | None = None,
     only_unmodeled: bool = True,
     inclusion_mode: str = "operation",
+    apply_capacity_filter: bool = DEFAULT_APPLY_CAPACITY_FILTER,
+    min_capacity_mw: float = DEFAULT_MIN_MODELING_CAPACITY_MW,
 ) -> pd.DataFrame:
     """Preview projects that match a bulk modeling date criterion.
 
@@ -410,6 +414,12 @@ def preview_projects_for_bulk_modeling_by_cod(
     - "operation": uses only COD_Actual.
     - "operation_projected": uses COD_Actual, then COD_Estimated,
       then Commissioning_Actual, then Commissioning_Estimated.
+
+    Capacity criterion:
+    - Transmission projects do not use a capacity threshold.
+    - Generation and DER use TotalCapacity.
+    - BESS uses PowerCapacity because the current ORM table has no TotalCapacity.
+    - When enabled, generation/BESS/DER must be >= min_capacity_mw.
     """
 
     if inclusion_mode not in VALID_INCLUSION_MODES:
@@ -424,6 +434,8 @@ def preview_projects_for_bulk_modeling_by_cod(
         selected_project_type = project_type
 
     only_unmodeled_int = 1 if only_unmodeled else 0
+    apply_capacity_filter_int = 1 if apply_capacity_filter else 0
+    min_capacity_mw = float(min_capacity_mw)
 
     query = text(
         """
@@ -434,6 +446,15 @@ def preview_projects_for_bulk_modeling_by_cod(
                 p.NUP,
                 p.project_discriminator,
                 pe.ProjectEntityName,
+                CASE
+                    WHEN p.project_discriminator = 'generation'
+                        THEN gp.TotalCapacity
+                    WHEN p.project_discriminator = 'der'
+                        THEN dp.TotalCapacity
+                    WHEN p.project_discriminator = 'bess'
+                        THEN bp.PowerCapacity
+                    ELSE NULL
+                END AS TotalCapacity,
                 mt.MilestoneName,
                 rd.DateValue,
                 rd.ExtractedAt,
@@ -442,18 +463,27 @@ def preview_projects_for_bulk_modeling_by_cod(
                     ORDER BY rd.ExtractedAt DESC, rd.DateValue DESC
                 ) AS RowNumber
             FROM Project p
+            LEFT JOIN ProjectStatus ps
+                ON p.StatusID = ps.StatusID
             INNER JOIN RelevantDate rd
                 ON p.ProjectID = rd.ProjectID
             INNER JOIN MilestoneType mt
                 ON rd.MilestoneTypeID = mt.MilestoneTypeID
             LEFT JOIN ProjectEntity pe
                 ON p.ProjectEntityID = pe.ProjectEntityID
-            WHERE mt.MilestoneName IN (
-                'COD_Actual',
-                'COD_Estimated',
-                'Commissioning_Actual',
-                'Commissioning_Estimated'
-            )
+            LEFT JOIN GenerationProject gp
+                ON p.ProjectID = gp.ProjectID
+            LEFT JOIN DERProject dp
+                ON p.ProjectID = dp.ProjectID
+            LEFT JOIN BESSProject bp
+                ON p.ProjectID = bp.ProjectID
+            WHERE ISNULL(ps.StatusName, '') <> 'Cancelled'
+                AND mt.MilestoneName IN (
+                    'COD_Actual',
+                    'COD_Estimated',
+                    'Commissioning_Actual',
+                    'Commissioning_Estimated'
+                )
         ),
         ProjectDates AS (
             SELECT
@@ -462,6 +492,7 @@ def preview_projects_for_bulk_modeling_by_cod(
                 MAX(NUP) AS NUP,
                 MAX(project_discriminator) AS project_discriminator,
                 MAX(ProjectEntityName) AS ProjectEntityName,
+                MAX(TotalCapacity) AS TotalCapacity,
                 MAX(CASE
                     WHEN MilestoneName = 'COD_Actual' AND RowNumber = 1
                     THEN DateValue
@@ -488,6 +519,7 @@ def preview_projects_for_bulk_modeling_by_cod(
                 NUP,
                 ProjectEntityName,
                 project_discriminator,
+                TotalCapacity,
                 COD_Actual,
                 COD_Estimated,
                 Commissioning_Actual,
@@ -527,6 +559,16 @@ def preview_projects_for_bulk_modeling_by_cod(
             ds.NUP,
             ds.ProjectEntityName,
             ds.project_discriminator,
+            ds.TotalCapacity,
+            CAST(
+                CASE
+                    WHEN :apply_capacity_filter = 0 THEN 1
+                    WHEN ds.project_discriminator NOT IN ('generation', 'bess', 'der')
+                        THEN 1
+                    WHEN ds.TotalCapacity >= :min_capacity_mw THEN 1
+                    ELSE 0
+                END AS int
+            ) AS IsCapacityEligible,
             ds.COD_Actual,
             ds.COD_Estimated,
             ds.Commissioning_Actual,
@@ -543,6 +585,11 @@ def preview_projects_for_bulk_modeling_by_cod(
             AND (
                 :project_type IS NULL
                 OR ds.project_discriminator = :project_type
+            )
+            AND (
+                :apply_capacity_filter = 0
+                OR ds.project_discriminator NOT IN ('generation', 'bess', 'der')
+                OR ds.TotalCapacity >= :min_capacity_mw
             )
             AND (
                 :only_unmodeled = 0
@@ -564,6 +611,8 @@ def preview_projects_for_bulk_modeling_by_cod(
                 "project_type": selected_project_type,
                 "only_unmodeled": only_unmodeled_int,
                 "inclusion_mode": inclusion_mode,
+                "apply_capacity_filter": apply_capacity_filter_int,
+                "min_capacity_mw": min_capacity_mw,
             },
         )
 
@@ -571,6 +620,12 @@ def preview_projects_for_bulk_modeling_by_cod(
         return df
 
     df["IsCurrentlyModeled"] = df["IsCurrentlyModeled"].astype(bool)
+
+    if "IsCapacityEligible" in df.columns:
+        df["IsCapacityEligible"] = df["IsCapacityEligible"].astype(bool)
+
+    if "TotalCapacity" in df.columns:
+        df["TotalCapacity"] = pd.to_numeric(df["TotalCapacity"], errors="coerce")
 
     date_columns = [
         "COD_Actual",
@@ -593,6 +648,8 @@ def bulk_set_modeled_by_cod_date(
     project_type: str | None = None,
     only_unmodeled: bool = True,
     inclusion_mode: str = "operation",
+    apply_capacity_filter: bool = DEFAULT_APPLY_CAPACITY_FILTER,
+    min_capacity_mw: float = DEFAULT_MIN_MODELING_CAPACITY_MW,
 ) -> dict[str, Any]:
     """Mark projects as modeled using the selected bulk modeling criterion."""
 
@@ -602,6 +659,8 @@ def bulk_set_modeled_by_cod_date(
         project_type=project_type,
         only_unmodeled=only_unmodeled,
         inclusion_mode=inclusion_mode,
+        apply_capacity_filter=apply_capacity_filter,
+        min_capacity_mw=min_capacity_mw,
     )
 
     if preview_df.empty:

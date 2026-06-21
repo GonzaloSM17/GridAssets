@@ -38,9 +38,9 @@ class ElectricalModelView:
             st.divider()
 
             tab_models, tab_bulk = st.tabs(
-                ["Modelos", "Gestión Masiva"]
+                ["Modelos", "Masiva"]
                 if compact
-                else ["Modelos eléctricos", "Gestión masiva de modelo"]
+                else ["Modelos eléctricos", "Modelación masiva"]
             )
 
             with tab_models:
@@ -79,7 +79,9 @@ class ElectricalModelView:
     def render_manage_model_form() -> None:
         """Render activate, deactivate and permanent delete controls."""
 
-        st.caption("Activa, desactiva o elimina definitivamente un modelo eléctrico.")
+        st.caption(
+            "Activa, desactiva o elimina definitivamente un modelo eléctrico."
+        )
 
         try:
             models_df = list_models(include_inactive=True)
@@ -289,6 +291,11 @@ class ElectricalModelView:
             "`COD_Actual > COD_Estimated > Commissioning_Actual > "
             "Commissioning_Estimated`."
         )
+        st.caption(
+            "Criterio eléctrico: generación/BESS/DER deben cumplir la "
+            "capacidad mínima seleccionada; transmisión no usa filtro de "
+            "capacidad."
+        )
 
         if compact:
             cutoff_date = st.date_input(
@@ -307,6 +314,25 @@ class ElectricalModelView:
                 "Solo no modelados",
                 value=True,
                 key="bulk_modeling_only_unmodeled",
+            )
+
+            apply_capacity_filter = st.checkbox(
+                "Filtro capacidad",
+                value=True,
+                key="bulk_modeling_apply_capacity_filter",
+                help=(
+                    "Aplica a generación, BESS y DER. Transmisión no usa "
+                    "este filtro."
+                ),
+            )
+
+            min_capacity_mw = st.number_input(
+                "Capacidad mínima MW",
+                min_value=0.0,
+                value=20.0,
+                step=1.0,
+                key="bulk_modeling_min_capacity_mw",
+                disabled=not apply_capacity_filter,
             )
         else:
             col_date, col_type, col_filter = st.columns([1, 1, 1], gap="large")
@@ -334,6 +360,30 @@ class ElectricalModelView:
                         "Si está marcado, excluye proyectos que ya están "
                         "modelados en el modelo seleccionado."
                     ),
+                )
+
+            col_capacity_filter, col_capacity_threshold = st.columns([1, 1], gap="large")
+
+            with col_capacity_filter:
+                apply_capacity_filter = st.checkbox(
+                    "Aplicar filtro de capacidad a generación/BESS/DER",
+                    value=True,
+                    key="bulk_modeling_apply_capacity_filter",
+                    help=(
+                        "Transmisión no usa este filtro. Para generación y DER "
+                        "se usa TotalCapacity; para BESS se usa PowerCapacity."
+                    ),
+                )
+
+            with col_capacity_threshold:
+                min_capacity_mw = st.number_input(
+                    "Capacidad mínima [MW]",
+                    min_value=0.0,
+                    value=20.0,
+                    step=1.0,
+                    key="bulk_modeling_min_capacity_mw",
+                    disabled=not apply_capacity_filter,
+                    help="Proyectos con capacidad igual al umbral sí se modelan.",
                 )
 
         project_type_map = {
@@ -389,6 +439,8 @@ class ElectricalModelView:
                     project_type=project_type,
                     only_unmodeled=only_unmodeled,
                     inclusion_mode=inclusion_mode,
+                    apply_capacity_filter=apply_capacity_filter,
+                    min_capacity_mw=min_capacity_mw,
                 )
                 st.session_state[preview_key] = preview_df
                 st.session_state[params_key] = {
@@ -399,6 +451,8 @@ class ElectricalModelView:
                     "selected_label": selected_label,
                     "inclusion_mode": inclusion_mode,
                     "inclusion_label": inclusion_label,
+                    "apply_capacity_filter": apply_capacity_filter,
+                    "min_capacity_mw": min_capacity_mw,
                 }
                 st.rerun()
             except Exception as exc:
@@ -419,6 +473,8 @@ class ElectricalModelView:
             and preview_params.get("project_type") == project_type
             and preview_params.get("only_unmodeled") == only_unmodeled
             and preview_params.get("inclusion_mode") == inclusion_mode
+            and preview_params.get("apply_capacity_filter") == apply_capacity_filter
+            and preview_params.get("min_capacity_mw") == min_capacity_mw
         )
 
         if st.button(
@@ -435,6 +491,8 @@ class ElectricalModelView:
                     project_type=project_type,
                     only_unmodeled=only_unmodeled,
                     inclusion_mode=inclusion_mode,
+                    apply_capacity_filter=apply_capacity_filter,
+                    min_capacity_mw=min_capacity_mw,
                 )
 
                 try:
@@ -494,6 +552,8 @@ class ElectricalModelView:
                 "NUP",
                 "ReferenceDate",
                 "ReferenceDateSource",
+                "TotalCapacity",
+                "IsCapacityEligible",
                 "IsCurrentlyModeled",
             ]
 
@@ -510,6 +570,8 @@ class ElectricalModelView:
                     "Commissioning_Estimated",
                     "ReferenceDate",
                     "ReferenceDateSource",
+                    "TotalCapacity",
+                    "IsCapacityEligible",
                     "IsCurrentlyModeled",
                 ]
 
@@ -556,6 +618,15 @@ class ElectricalModelView:
                     "ReferenceDateSource": st.column_config.TextColumn(
                         "Fuente",
                         width=150,
+                    ),
+                    "TotalCapacity": st.column_config.NumberColumn(
+                        "Cap. [MW]",
+                        width=95,
+                        format="%.1f",
+                    ),
+                    "IsCapacityEligible": st.column_config.CheckboxColumn(
+                        "Cap. OK",
+                        width=90,
                     ),
                     "IsCurrentlyModeled": st.column_config.CheckboxColumn(
                         "Modelado",
